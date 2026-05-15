@@ -1198,10 +1198,12 @@ impl<'a> ModuleExportState<'a> {
                     }
 
                     // AddressOfOp is also virtual in textual LLVM IR: uses
-                    // must print the global symbol directly. Pre-register it
-                    // here so CFG order cannot expose a stale temporary name
-                    // when a later-printed block defines the address used by
-                    // an earlier-printed block.
+                    // must print the global symbol directly. Pre-register
+                    // the result as `@<global_name>` here so CFG order
+                    // cannot expose a stale temporary name when a
+                    // later-printed block defines the address used by an
+                    // earlier-printed block. The op-emit arm in `export_op`
+                    // for AddressOfOp asserts this invariant.
                     if op_id == ops::AddressOfOp::get_opid_static() {
                         let address_of =
                             Operation::get_op::<ops::AddressOfOp>(op, self.ctx).unwrap();
@@ -2170,14 +2172,21 @@ impl<'a> ModuleExportState<'a> {
 
             // --- Address Operations ---
             id if id == ops::AddressOfOp::get_opid_static() => {
-                // AddressOfOp gets the address of a global variable.
-                // In LLVM IR, this is represented by using the global name directly.
-                let address_of = op_obj.as_ref().downcast_ref::<ops::AddressOfOp>().unwrap();
-                let global_name = address_of.get_global_name(self.ctx);
-
-                // The result is the global address - just use @global_name
+                // AddressOfOp is virtual in textual LLVM IR: every use site
+                // prints the global symbol directly. The naming pre-pass in
+                // export_func registers the result as `@<global_name>` before
+                // any block is emitted, so there is nothing to write here.
+                // The debug-only assertion keeps the contract honest if the
+                // pre-pass is ever refactored.
                 let res = op_ref.get_result(0);
-                value_names.insert(res, format!("@{global_name}"));
+                debug_assert!(
+                    value_names
+                        .get(&res)
+                        .is_some_and(|name| name.starts_with('@')),
+                    "AddressOfOp result must be pre-registered as a global \
+                     symbol by the naming pre-pass; got {:?}",
+                    value_names.get(&res),
+                );
             }
 
             // --- Constants (Virtual) ---
