@@ -195,15 +195,10 @@ pub(crate) fn convert_atomic_rmw(
     // Pre-fence (if needed)
     match nvvm_ordering {
         NvvmOrdering::Release | NvvmOrdering::AcqRel => {
-            emit_fence(
-                ctx,
-                rewriter,
-                LlvmAtomicOrdering::Release,
-                syncscope.clone(),
-            );
+            emit_fence(ctx, rewriter, LlvmAtomicOrdering::Release, syncscope);
         }
         NvvmOrdering::SeqCst => {
-            emit_fence(ctx, rewriter, LlvmAtomicOrdering::SeqCst, syncscope.clone());
+            emit_fence(ctx, rewriter, LlvmAtomicOrdering::SeqCst, syncscope);
         }
         NvvmOrdering::Relaxed | NvvmOrdering::Acquire => {}
     }

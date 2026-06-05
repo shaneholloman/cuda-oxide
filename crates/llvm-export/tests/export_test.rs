@@ -48,7 +48,7 @@ fn export_addressof_uses_symbol_when_definition_block_prints_later() {
     global.set_address_space(&mut ctx, 3);
     global.get_operation().insert_at_back(module_block, &ctx);
 
-    let void_ty = VoidType::get(&mut ctx);
+    let void_ty = VoidType::get(&ctx);
     let func_ty = FuncType::get(&mut ctx, void_ty.to_ptr(), vec![], false);
     let func = FuncOp::new(&mut ctx, "uses_late_addressof".try_into().unwrap(), func_ty);
     let entry = func.get_or_create_entry_block(&mut ctx);

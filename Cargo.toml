@@ -36,18 +36,16 @@ repository = "https://github.com/NVlabs/cuda-oxide.git"
 # Examples are in: crates/rustc-codegen-cuda/examples/
 
 [workspace.dependencies]
-# Pliron MLIR framework.
-# Pinned to the `cuda-oxide-llvm-additions` branch on the fork
-# (https://github.com/nihalpasham/pliron), which stacks the additions cuda-oxide
-# needs (address spaces, atomics, inline asm, FP16, stronger verification) on top
-# of upstream pliron. pliron-llvm uses default-features = false to keep llvm-sys
-# (LLVM 22) out: cuda-oxide consumes the dialect modeling only, not the FFI
-# bridge. `crates/rustc-codegen-cuda/Cargo.toml` MUST stay on this same rev, or
-# pliron resolves to two distinct crates and types stop unifying. Bump the rev if
-# that branch is amended during review.
-pliron = { git = "https://github.com/nihalpasham/pliron", rev = "94d925477aeea59feba0d6b1314aa2b7e01a71aa" }
-pliron-derive = { git = "https://github.com/nihalpasham/pliron", rev = "94d925477aeea59feba0d6b1314aa2b7e01a71aa" }
-pliron-llvm = { git = "https://github.com/nihalpasham/pliron", rev = "94d925477aeea59feba0d6b1314aa2b7e01a71aa", default-features = false }
+# Pliron MLIR framework, pinned to upstream master. The additions cuda-oxide
+# needs (address spaces, atomics, inline asm, FP16, stronger verification) landed
+# upstream in pliron via #94 (which absorbed #116), so we track master directly.
+# pliron-llvm uses default-features = false to keep llvm-sys (LLVM 22) out:
+# cuda-oxide consumes the dialect modeling only, not the FFI bridge.
+# `crates/rustc-codegen-cuda/Cargo.toml` MUST stay on this same rev, or pliron
+# resolves to two distinct crates and types stop unifying.
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "fed4e6f848bd726a4f2deb51c5021760ef382aec" }
+pliron-derive = { git = "https://github.com/pliron-org/pliron", rev = "fed4e6f848bd726a4f2deb51c5021760ef382aec" }
+pliron-llvm = { git = "https://github.com/pliron-org/pliron", rev = "fed4e6f848bd726a4f2deb51c5021760ef382aec", default-features = false }
 
 # Internal crates
 llvm-export = { path = "crates/llvm-export" }
