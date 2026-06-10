@@ -5452,12 +5452,30 @@ fn enum_variant_index_from_bytes(
 
             match tag_encoding {
                 rustc_public::abi::TagEncoding::Direct => {
-                    // The tag bytes hold a declared discriminant VALUE; the
-                    // caller wants a variant INDEX. A tag that matches no
-                    // declared discriminant means we misread the constant;
-                    // falling back to "value == index" would silently
-                    // conflate the two semantics (the issue #146 bug class).
-                    discriminant_to_variant_index(rust_ty, tag_value as usize).ok_or_else(|| {
+                    // The tag bytes hold a declared discriminant VALUE
+                    // truncated to the PHYSICAL tag width; the caller wants
+                    // a variant INDEX. `discriminant_for_variant().val` is
+                    // at the declared discriminant type's width (isize for
+                    // default-repr enums), so the comparison must mask both
+                    // sides to the tag width (`Neg::N = -5` is byte 0xFB in
+                    // an i8 tag but 0xFFFF_FFFF_FFFF_FFFB as isize). A tag
+                    // that matches no declared discriminant means we
+                    // misread the constant; falling back to
+                    // "value == index" would silently conflate the two
+                    // semantics (the issue #146 bug class).
+                    let primitive = match tag {
+                        rustc_public::abi::Scalar::Initialized { value, .. }
+                        | rustc_public::abi::Scalar::Union { value } => *value,
+                    };
+                    let scalar_size = primitive.size(&rustc_public::target::MachineInfo::target());
+                    let mask = scalar_size.unsigned_int_max().ok_or_else(|| {
+                        input_error_noloc!(TranslationErr::unsupported(format!(
+                            "Enum tag width {} exceeds 128 bits",
+                            scalar_size.bits()
+                        )))
+                    })?;
+
+                    discriminant_to_variant_index(rust_ty, tag_value, mask).ok_or_else(|| {
                         input_error!(
                             loc.clone(),
                             TranslationErr::unsupported(format!(
@@ -5645,10 +5663,18 @@ fn read_uint_from_bytes(bytes: &[u8]) -> u128 {
 /// - Variant index: position in the enum (0, 1, 2, ...)
 /// - Discriminant: the explicit or implicit value assigned to each variant
 ///
+/// `tag_value` is the raw tag read from memory, i.e. the discriminant
+/// truncated to the PHYSICAL tag width, while `discriminant_for_variant`
+/// reports values at the declared discriminant type's width (isize for
+/// default-repr enums). `mask` is the tag width's unsigned max; both
+/// sides are masked to it so negative discriminants compare correctly
+/// (`-5` is `0xFB` in an i8 tag but `0xFFFF_FFFF_FFFF_FFFB` as isize).
+///
 /// This function iterates through variants to find which one has the given discriminant.
 fn discriminant_to_variant_index(
     rust_ty: &rustc_public::ty::Ty,
-    discriminant_value: usize,
+    tag_value: u128,
+    mask: u128,
 ) -> Option<usize> {
     use rustc_public::ty::{RigidTy, TyKind};
 
@@ -5657,11 +5683,10 @@ fn discriminant_to_variant_index(
             for (idx, _variant_def) in adt_def.variants().iter().enumerate() {
                 let variant_idx = rustc_public::ty::VariantIdx::to_val(idx);
                 let discr = adt_def.discriminant_for_variant(variant_idx);
-                if discr.val as usize == discriminant_value {
+                if discr.val & mask == tag_value & mask {
                     return Some(idx);
                 }
             }
-            // If not found, the discriminant might equal the index (common case)
             None
         }
         _ => None,
