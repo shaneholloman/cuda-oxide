@@ -25,17 +25,30 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
-#[derive(Clone, Copy, Default, Eq, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
 struct Foo<T> {
     pieces: [T; 4],
 }
 
+// Hand-written Ord delegating to integer cmp is the test subject: since
+// Rust 1.80 it lowers through MIR BinOp::Cmp (the three_way_compare
+// intrinsic). PartialOrd delegates to it, the canonical pairing for a
+// manual Ord (clippy::derive_ord_xor_partial_ord).
 impl<T> Ord for Foo<T>
 where
     T: Ord,
 {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.pieces[0].cmp(&other.pieces[0])
+    }
+}
+
+impl<T> PartialOrd for Foo<T>
+where
+    T: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -182,11 +195,15 @@ mod kernels {
     }
 
     fn pick_sparse(x: u32) -> Sparse {
-        if x % 2 == 0 { Sparse::A } else { Sparse::B }
+        if x.is_multiple_of(2) {
+            Sparse::A
+        } else {
+            Sparse::B
+        }
     }
 
     fn pick_neg(x: u32) -> Neg {
-        if x % 2 == 0 { Neg::N } else { Neg::Z }
+        if x.is_multiple_of(2) { Neg::N } else { Neg::Z }
     }
 
     #[kernel]
