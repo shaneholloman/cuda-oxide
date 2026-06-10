@@ -110,6 +110,7 @@ The `examples/` directory contains standalone kernel crates that exercise differ
 | `cuda_module_contract`       | Typed launch ABI argument marshalling                      |
 | `abi_hmm`                    | HMM pointers, struct layout, closures                      |
 | `device_closures`            | Move and non-move closures passed to kernels               |
+| `closure_index_miscompile`   | Borrow / raw-pointer address projections (issue #120)      |
 | `cross_crate_kernel`         | Kernels defined in a library crate                         |
 | `async_vecadd`               | Async CUDA streams with `cuda-async`                       |
 | `async_mlp`                  | Multi-layer perceptron using async streams                 |
