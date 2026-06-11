@@ -169,6 +169,20 @@ fn translate_pointer_like(
             let elem = translate_type(ctx, &elem_ty)?;
             Ok(MirSliceType::get(ctx, elem).into())
         }
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Str) => {
+            // `&str` / `*const str` is a fat pointer (data ptr + length),
+            // exactly like `&[u8]`. Without this arm it would fall through
+            // to the generic case below and become a THIN pointer to the
+            // slice struct: 8 bytes where Rust has 16, silently corrupting
+            // any local that holds one.
+            let u8_ty = pliron::builtin::types::IntegerType::get(
+                ctx,
+                8,
+                pliron::builtin::types::Signedness::Unsigned,
+            )
+            .into();
+            Ok(MirSliceType::get(ctx, u8_ty).into())
+        }
         rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Adt(adt_def, substs))
             if adt_def.trimmed_name() == "SharedArray" =>
         {
