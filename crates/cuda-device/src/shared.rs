@@ -325,14 +325,17 @@ impl<T, const N: usize, const ALIGN: usize> IndexMut<usize> for SharedArray<T, N
 /// Specify the shared memory size in the launch configuration:
 ///
 /// ```rust,ignore
-/// cuda_launch! {
-///     kernel: flexible_kernel,
-///     config: LaunchConfig {
-///         grid_dim: (blocks, 1, 1),
-///         block_dim: (256, 1, 1),
-///         shared_mem_bytes: 2048,  // 512 f32s total
-///     },
-///     // ...
+/// // SAFETY: argument list matches `flexible_kernel`'s signature.
+/// unsafe {
+///     cuda_launch! {
+///         kernel: flexible_kernel,
+///         config: LaunchConfig {
+///             grid_dim: (blocks, 1, 1),
+///             block_dim: (256, 1, 1),
+///             shared_mem_bytes: 2048,  // 512 f32s total
+///         },
+///         // ...
+///     }
 /// }
 /// ```
 ///

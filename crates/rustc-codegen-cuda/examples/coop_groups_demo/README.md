@@ -158,8 +158,10 @@ The recipe is identical for every test in the file:
 1. Write a `#[kernel]` function that performs the operation under test
    and writes its result into a `DisjointSlice<T>`.
 2. In `main`, allocate a `DeviceBuffer<T>` of the right size, launch
-   via `cuda_launch!`, copy back with `to_host_vec`, and compare each
-   cell against a host-computed expected value.
+   via `unsafe { cuda_launch! { ... } }` (the macro cannot check the
+   argument list, so each site carries a SAFETY comment), copy back
+   with `to_host_vec`, and compare each cell against a host-computed
+   expected value.
 3. Print one summary line ending in `yes` or `NO`. On `NO`, also
    print the first few mismatches and `std::process::exit(1)` so the
    smoketest harness flags it.

@@ -619,12 +619,16 @@ fn main() {
     // --- active_mask ---
     println!("--- active_mask() ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
-    cuda_launch! {
-        kernel: test_active_mask,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_active_mask`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_active_mask,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice_mut(out)]
+        }
     }
     .expect("test_active_mask launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -637,12 +641,16 @@ fn main() {
     // --- match_any_sync ---
     println!("\n--- match_any_sync(value = lane / 4) ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
-    cuda_launch! {
-        kernel: test_match_any,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_match_any`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_match_any,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice_mut(out)]
+        }
     }
     .expect("test_match_any launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -658,12 +666,16 @@ fn main() {
     // --- match_all_sync ---
     println!("\n--- match_all_sync(constant) ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
-    cuda_launch! {
-        kernel: test_match_all,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_match_all`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_match_all,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice_mut(out)]
+        }
     }
     .expect("test_match_all launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -709,12 +721,16 @@ fn main() {
     // --- WarpTile<32>::ballot ---
     println!("\n--- WarpTile<32>::ballot(lane_id & 1) ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
-    cuda_launch! {
-        kernel: test_typed_warp32_ballot,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_typed_warp32_ballot`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_typed_warp32_ballot,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice_mut(out)]
+        }
     }
     .expect("test_typed_warp32_ballot launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -731,12 +747,16 @@ fn main() {
     // --- WarpTile<16>::ballot ---
     println!("\n--- WarpTile<16>::ballot(lane_id & 1) ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
-    cuda_launch! {
-        kernel: test_typed_warp16_ballot,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_typed_warp16_ballot`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_typed_warp16_ballot,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice_mut(out)]
+        }
     }
     .expect("test_typed_warp16_ballot launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -753,12 +773,16 @@ fn main() {
     // --- WarpTile<16>::shfl ---
     println!("\n--- WarpTile<16>::shfl(lane_id, 0) ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, N).unwrap();
-    cuda_launch! {
-        kernel: test_typed_warp16_shfl,
-        stream: stream,
-        module: module,
-        config: cfg,
-        args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_typed_warp16_shfl`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_typed_warp16_shfl,
+            stream: stream,
+            module: module,
+            config: cfg,
+            args: [slice_mut(out)]
+        }
     }
     .expect("test_typed_warp16_shfl launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -800,12 +824,16 @@ fn main() {
     println!("\n--- this_grid().thread_rank() ---");
     let total = (BLOCKS * block_threads) as usize;
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, total).unwrap();
-    cuda_launch! {
-        kernel: test_typed_grid_rank,
-        stream: stream,
-        module: module,
-        config: coop_cfg,
-        args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_typed_grid_rank`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_typed_grid_rank,
+            stream: stream,
+            module: module,
+            config: coop_cfg,
+            args: [slice_mut(out)]
+        }
     }
     .expect("test_typed_grid_rank launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -837,9 +865,13 @@ fn main() {
     // --- warp_reduce<u32> ---
     println!("\n--- warp_reduce::<u32, _>, all 6 ops ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, warp_count * 6).unwrap();
-    cuda_launch! {
-        kernel: test_warp_reduce_u32, stream: stream, module: module,
-        config: cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_warp_reduce_u32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_warp_reduce_u32, stream: stream, module: module,
+            config: cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_warp_reduce_u32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -877,9 +909,13 @@ fn main() {
     // --- warp_reduce<i32> ---
     println!("\n--- warp_reduce::<i32, _>, [Sum, Min, Max] ---");
     let mut out = DeviceBuffer::<i32>::zeroed(&stream, warp_count * 3).unwrap();
-    cuda_launch! {
-        kernel: test_warp_reduce_i32, stream: stream, module: module,
-        config: cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_warp_reduce_i32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_warp_reduce_i32, stream: stream, module: module,
+            config: cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_warp_reduce_i32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -910,9 +946,13 @@ fn main() {
     // --- warp_reduce<f32> ---
     println!("\n--- warp_reduce::<f32, _>, [Sum, Min, Max] ---");
     let mut out = DeviceBuffer::<f32>::zeroed(&stream, warp_count * 3).unwrap();
-    cuda_launch! {
-        kernel: test_warp_reduce_f32, stream: stream, module: module,
-        config: cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_warp_reduce_f32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_warp_reduce_f32, stream: stream, module: module,
+            config: cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_warp_reduce_f32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -943,9 +983,13 @@ fn main() {
     // --- warp_scan<u32> ---
     println!("\n--- warp_scan::<u32, _> (inclusive), all 6 ops ---");
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, N * 6).unwrap();
-    cuda_launch! {
-        kernel: test_warp_scan_u32, stream: stream, module: module,
-        config: cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_warp_scan_u32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_warp_scan_u32, stream: stream, module: module,
+            config: cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_warp_scan_u32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -992,9 +1036,13 @@ fn main() {
     // --- warp_scan<i32> ---
     println!("\n--- warp_scan::<i32, _> (inclusive), [Sum, Min, Max] ---");
     let mut out = DeviceBuffer::<i32>::zeroed(&stream, N * 3).unwrap();
-    cuda_launch! {
-        kernel: test_warp_scan_i32, stream: stream, module: module,
-        config: cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_warp_scan_i32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_warp_scan_i32, stream: stream, module: module,
+            config: cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_warp_scan_i32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -1034,9 +1082,13 @@ fn main() {
     // --- warp_scan<f32> ---
     println!("\n--- warp_scan::<f32, _> (inclusive), [Sum, Min, Max] ---");
     let mut out = DeviceBuffer::<f32>::zeroed(&stream, N * 3).unwrap();
-    cuda_launch! {
-        kernel: test_warp_scan_f32, stream: stream, module: module,
-        config: cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_warp_scan_f32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_warp_scan_f32, stream: stream, module: module,
+            config: cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_warp_scan_f32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -1139,9 +1191,13 @@ fn main() {
         BLOCK_SIZE / 32
     );
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, NUM_BLOCKS * 6).unwrap();
-    cuda_launch! {
-        kernel: test_block_reduce_u32, stream: stream, module: module,
-        config: block_cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_block_reduce_u32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_block_reduce_u32, stream: stream, module: module,
+            config: block_cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_block_reduce_u32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -1175,9 +1231,13 @@ fn main() {
         BLOCK_SIZE
     );
     let mut out = DeviceBuffer::<i32>::zeroed(&stream, NUM_BLOCKS * 3).unwrap();
-    cuda_launch! {
-        kernel: test_block_reduce_i32, stream: stream, module: module,
-        config: block_cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_block_reduce_i32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_block_reduce_i32, stream: stream, module: module,
+            config: block_cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_block_reduce_i32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -1211,9 +1271,13 @@ fn main() {
         BLOCK_SIZE
     );
     let mut out = DeviceBuffer::<f32>::zeroed(&stream, NUM_BLOCKS * 3).unwrap();
-    cuda_launch! {
-        kernel: test_block_reduce_f32, stream: stream, module: module,
-        config: block_cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_block_reduce_f32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_block_reduce_f32, stream: stream, module: module,
+            config: block_cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_block_reduce_f32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -1247,9 +1311,13 @@ fn main() {
         BLOCK_SIZE
     );
     let mut out = DeviceBuffer::<u32>::zeroed(&stream, TOTAL_THREADS * 6).unwrap();
-    cuda_launch! {
-        kernel: test_block_scan_u32, stream: stream, module: module,
-        config: block_cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_block_scan_u32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_block_scan_u32, stream: stream, module: module,
+            config: block_cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_block_scan_u32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -1287,9 +1355,13 @@ fn main() {
         BLOCK_SIZE
     );
     let mut out = DeviceBuffer::<i32>::zeroed(&stream, TOTAL_THREADS * 3).unwrap();
-    cuda_launch! {
-        kernel: test_block_scan_i32, stream: stream, module: module,
-        config: block_cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_block_scan_i32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_block_scan_i32, stream: stream, module: module,
+            config: block_cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_block_scan_i32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();
@@ -1327,9 +1399,13 @@ fn main() {
         BLOCK_SIZE
     );
     let mut out = DeviceBuffer::<f32>::zeroed(&stream, TOTAL_THREADS * 3).unwrap();
-    cuda_launch! {
-        kernel: test_block_scan_f32, stream: stream, module: module,
-        config: block_cfg, args: [slice_mut(out)]
+    // SAFETY: `slice_mut(out)` is the (ptr, len) pair for `test_block_scan_f32`'s single
+    // slice parameter (see the #[kernel] fn above); `out` is a live DeviceBuffer.
+    unsafe {
+        cuda_launch! {
+            kernel: test_block_scan_f32, stream: stream, module: module,
+            config: block_cfg, args: [slice_mut(out)]
+        }
     }
     .expect("test_block_scan_f32 launch failed");
     let host = out.to_host_vec(&stream).unwrap();

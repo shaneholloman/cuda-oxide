@@ -37,7 +37,10 @@
 //! - [`cuda_module`]: Generate a typed embedded-module loader and per-kernel
 //!   sync launch methods from an inline kernel module. Enable the `async`
 //!   feature for borrowed and owned async launch methods.
-//! - [`cuda_launch!`]: Low-level launch macro retained for migration.
+//! - [`cuda_launch!`]: Unsafe low-level launch macro. It cannot check
+//!   argument count or types, so callers must wrap it in `unsafe { }`. Its
+//!   niche is modules loaded at runtime by name; for embedded kernels use
+//!   `#[cuda_module]`.
 //! - `cuda_launch_async!`: Low-level async launch macro retained for
 //!   migration when the `async` feature is enabled.
 //!

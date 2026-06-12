@@ -94,7 +94,7 @@
 //!
 //! // my_app/src/main.rs
 //! use my_cuda_lib::reduce;
-//! cuda_launch! { kernel: reduce::<f32>, ... }  // PTX generated here!
+//! unsafe { cuda_launch! { kernel: reduce::<f32>, ... } }  // PTX generated here!
 //! ```
 //!
 //! Functions from `std` are FORBIDDEN because they require OS/threads/IO.

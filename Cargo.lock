@@ -363,6 +363,8 @@ dependencies = [
 name = "cuda-macros"
 version = "0.2.1"
 dependencies = [
+ "cuda-core",
+ "cuda-host",
  "proc-macro2",
  "quote",
  "reserved-oxide-symbols",

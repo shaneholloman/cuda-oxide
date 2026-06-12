@@ -5,7 +5,8 @@ configure the launch grid, marshal arguments, and dispatch the work to the GPU.
 The primary cuda-oxide launch path is `#[cuda_module]`: it embeds the generated
 device artifact into the host binary and generates typed launch methods. The
 lower-level `load_kernel_module` and `cuda_launch!` APIs remain available when
-you need explicit sidecar loading or custom launch code.
+you need explicit sidecar loading or custom launch code; note `cuda_launch!`
+is unsafe and must be wrapped in `unsafe { }`.
 
 :::{seealso}
 [CUDA Programming Guide -- Execution Configuration](https://docs.nvidia.com/cuda/cuda-programming-guide/#execution-configuration)
@@ -106,23 +107,34 @@ kernel was successfully **enqueued** -- not that it finished. To check for
 runtime errors (e.g., out-of-bounds trap), synchronize the stream or context
 afterward.
 
-## `cuda_launch!` -- lower-level launch
+## `cuda_launch!` -- unsafe lower-level launch
 
-`cuda_launch!` is the explicit launch API used by older code and by examples
-that intentionally load a specific module. It remains useful when you need to
-choose a sidecar PTX/cubin/LTOIR artifact manually.
+`cuda_launch!` is the explicit, unsafe escape hatch below `#[cuda_module]`.
+Its niche is modules loaded at runtime by name (a sidecar PTX/cubin/LTOIR
+artifact you choose manually), where no compile-time kernel signature exists
+to check against.
+
+Because the macro cannot verify the argument list, every use must sit inside
+an `unsafe { }` block. The caller promises that argument count, order, and
+types match the kernel's actual signature, and that pointer arguments are
+device-accessible. A mismatch is undefined behavior: the driver reads past
+the end of the args array, or the device dereferences junk.
 
 ```rust
 use cuda_host::{cuda_launch, load_kernel_module};
 
 let module = load_kernel_module(&ctx, "vecadd").unwrap();
 
-cuda_launch! {
-    kernel: vecadd,
-    stream: stream,
-    module: module,
-    config: LaunchConfig::for_num_elems(1024),
-    args: [slice(a), slice(b), slice_mut(c)]
+// SAFETY: args match vecadd's signature (three slices); a, b, c are live
+// device buffers.
+unsafe {
+    cuda_launch! {
+        kernel: vecadd,
+        stream: stream,
+        module: module,
+        config: LaunchConfig::for_num_elems(1024),
+        args: [slice(a), slice(b), slice_mut(c)]
+    }
 }
 .expect("Kernel launch failed");
 ```
@@ -324,13 +336,16 @@ On the host, the launch uses `launch_kernel_ex` (the extended launch API) with
 cluster dimensions. `cuda_launch!` supports this via the `cluster_dim` field:
 
 ```rust
-cuda_launch! {
-    kernel: cluster_kernel,
-    stream: stream,
-    module: module,
-    config: config,
-    cluster_dim: (4, 1, 1),
-    args: [slice_mut(out_dev)]
+// SAFETY: args match cluster_kernel's signature; out_dev is a live buffer.
+unsafe {
+    cuda_launch! {
+        kernel: cluster_kernel,
+        stream: stream,
+        module: module,
+        config: config,
+        cluster_dim: (4, 1, 1),
+        args: [slice_mut(out_dev)]
+    }
 }
 .expect("Cluster launch failed");
 ```
@@ -378,8 +393,8 @@ changes how the host submits the launch. The two attributes may be combined
 on one kernel, in which case both launch attributes go into the same
 `cuLaunchKernelEx` call.
 
-The legacy `cuda_launch!` macro offers the same behaviour through its
-`cooperative: true` field.
+The legacy (caller-unsafe) `cuda_launch!` macro offers the same behaviour
+through its `cooperative: true` field.
 
 :::{tip}
 The whole grid must fit on the device in a single wave, or the driver rejects
