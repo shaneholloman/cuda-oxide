@@ -470,6 +470,31 @@ pub fn convert(
         flatten_arguments(ctx, rewriter, &args, operands_info, expected_param_tys)?;
 
     let func_type = llvm_types::FuncType::get(ctx, result_type, flattened_arg_types, false);
+
+    // Direct libdevice calls (`__nv_*`) originate from hand-written externs
+    // (e.g. khal_std's `Float::asin`/`acos` → `__nv_asinf`/`__nv_acosf`) that
+    // have no MIR body and therefore no emitted declaration. Without a module
+    // declaration the verifier rejects the call ("Symbol __nv_asinf not found").
+    // Declare it here with the call's signature, mirroring the float-math
+    // intrinsic path; the symbol is bound against libdevice at the cubin-link
+    // stage just like `__nv_expf`/`__nv_sqrtf`.
+    {
+        let resolved_name = resolve_device_extern_symbol(&callee_name);
+        let parent_block = op.deref(ctx).get_parent_block();
+        if resolved_name.starts_with("__nv_")
+            && let Some(parent_block) = parent_block
+        {
+            let loc = op.deref(ctx).loc();
+            helpers::ensure_intrinsic_declared(ctx, parent_block, &resolved_name, func_type)
+                .map_err(|e| {
+                    pliron::input_error!(
+                        loc,
+                        "Failed to declare libdevice extern {resolved_name}: {e}"
+                    )
+                })?;
+        }
+    }
+
     let llvm_call = llvm::CallOp::new(
         ctx,
         CallOpCallable::Direct(callee_ident),

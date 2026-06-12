@@ -545,6 +545,12 @@ fn lower_to_llvm(ctx: &mut Context, module_op_ptr: Ptr<Operation>) -> Result<(),
 /// device extern function. These declarations ensure that calls to extern
 /// functions pass verification; the matching `declare` statements with
 /// attributes are emitted during LLVM IR export.
+///
+/// Idempotent with respect to the lowering step that runs before it: a
+/// symbol may already have been declared at a call site (mir-lower declares
+/// `__nv_*` libdevice callees on demand). Inserting a second `FuncOp` for
+/// the same symbol would fail module verification with a multiple-definition
+/// error, so symbols that already exist in the module are skipped.
 fn add_device_extern_declarations(
     ctx: &mut Context,
     module_op_ptr: Ptr<Operation>,
@@ -553,6 +559,7 @@ fn add_device_extern_declarations(
     use llvm_export::ops::FuncOp;
     use llvm_export::types::{FuncType, VoidType};
     use pliron::identifier::Identifier;
+    use std::collections::HashSet;
 
     // Get the module's block pointer first (this is a Ptr, not a Ref, so no borrow issues)
     let block = {
@@ -560,7 +567,19 @@ fn add_device_extern_declarations(
         region.iter(ctx).next().expect("Module should have a block")
     };
 
+    let declared_symbols: HashSet<String> = block
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| {
+            Operation::get_op::<FuncOp>(op, ctx).map(|f| f.get_symbol_name(ctx).to_string())
+        })
+        .collect();
+
     for decl in device_externs {
+        if declared_symbols.contains(&decl.export_name) {
+            continue;
+        }
+
         // Parse parameter types from strings
         let param_types: Vec<_> = decl
             .param_types

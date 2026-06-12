@@ -1529,6 +1529,12 @@ fn extract_closure_body_name(closure_arg: &mir::Operand, body: &mir::Body) -> Op
 /// For generic calls, `Instance::resolve` + `mangled_name` is used instead, which
 /// the collector also matches via `compute_export_name`.
 ///
+/// Foreign items (`extern "C"` block declarations) are the exception: they
+/// have no MIR body, so the collector never exports a definition under the
+/// FQDN and the device linker (libdevice, external LTOIR) only knows the
+/// link symbol. `call_name` for those is `Instance::mangled_name`, which is
+/// the link symbol (it honours `#[link_name]`).
+///
 fn extract_func_info(func: &mir::Operand) -> (Option<String>, Option<String>, Option<String>) {
     match func {
         mir::Operand::Constant(const_op) => match const_op.const_.kind() {
@@ -1539,16 +1545,26 @@ fn extract_func_info(func: &mir::Operand) -> (Option<String>, Option<String>, Op
                         fn_def,
                         substs,
                     )) => {
+                        use rustc_public::mir::mono::Instance;
+
                         let pattern_name = fn_def.name().as_str().to_string();
 
                         let has_generic_args = !substs.0.is_empty();
                         let call_name = if has_generic_args {
-                            use rustc_public::mir::mono::Instance;
                             if let Ok(instance) = Instance::resolve(*fn_def, substs) {
                                 instance.mangled_name()
                             } else {
                                 pattern_name.clone()
                             }
+                        } else if let Ok(instance) = Instance::resolve(*fn_def, substs)
+                            && instance.is_foreign_item()
+                        {
+                            // Foreign items (`extern "C"` blocks) have no MIR
+                            // body, so no definition is ever exported under
+                            // the FQDN. Emit the call under the link symbol
+                            // (e.g. `__nv_asinf`), which is what libdevice or
+                            // externally linked LTOIR actually provides.
+                            instance.mangled_name()
                         } else {
                             pattern_name.clone()
                         };
