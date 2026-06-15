@@ -5,6 +5,24 @@
 
 //! Constant and literal formatting for LLVM IR output.
 
+pub(super) fn format_string_literal(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    for byte in value.bytes() {
+        match byte {
+            // LLVM IR string constants use \XX byte escapes, where XX is a
+            // two-digit hex value. See:
+            // https://llvm.org/docs/LangRef.html#string-constants
+            b'"' | b'\\' | 0x00..=0x1f | 0x7f..=0xff => {
+                output.push_str(&format!("\\{byte:02X}"));
+            }
+            _ => output.push(byte as char),
+        }
+    }
+    output.push('"');
+    output
+}
+
 pub(super) fn format_half_literal(bits: u16) -> String {
     format!("0xH{bits:04X}")
 }
@@ -45,8 +63,20 @@ pub(super) fn format_float_literal(value: f64) -> String {
 }
 
 #[cfg(test)]
-mod float_literal_tests {
-    use super::format_float_literal;
+mod literal_tests {
+    use super::{format_float_literal, format_string_literal};
+
+    #[test]
+    fn string_literals_escape_special_and_non_printable_bytes() {
+        let output = format_string_literal("quote \" slash \\ newline\n tab\t");
+        assert_eq!(output, "\"quote \\22 slash \\5C newline\\0A tab\\09\"");
+    }
+
+    #[test]
+    fn string_literals_escape_utf8_as_bytes() {
+        let output = format_string_literal("µ");
+        assert_eq!(output, "\"\\C2\\B5\"");
+    }
 
     #[test]
     fn nan_is_emitted_as_hex_qnan_not_bare_token() {

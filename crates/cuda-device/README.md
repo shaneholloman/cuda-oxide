@@ -148,6 +148,7 @@ These are defined in `cuda-macros` and re-exported from `cuda-device` for conven
 | `#[pure]`                | Mark as pure (no side effects)                |
 | `#[readonly]`            | Mark as read-only                             |
 | `gpu_printf!`            | Device-side printf                            |
+| `ptx_asm!`               | Unsafe CUDA inline PTX                        |
 
 ## Safety Model
 

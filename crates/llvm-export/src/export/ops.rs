@@ -32,7 +32,7 @@ use crate::{
 };
 
 use super::{
-    literals::{format_float_literal, format_half_literal},
+    literals::{format_float_literal, format_half_literal, format_string_literal},
     state::ModuleExportState,
 };
 
@@ -847,6 +847,7 @@ impl<'a> ModuleExportState<'a> {
         let op_ref = op.get_operation().deref(self.ctx);
         let asm_template = read_string_attr(op.get_attr_inline_asm_template(self.ctx));
         let constraints = read_string_attr(op.get_attr_inline_asm_constraints(self.ctx));
+        let sideeffect = ops::inline_asm_sideeffect(self.ctx, op.get_operation());
         let is_convergent = read_bool_attr(op.get_attr_inline_asm_convergent(self.ctx));
 
         // pliron-llvm always stores a single result slot (a void result for
@@ -862,11 +863,13 @@ impl<'a> ModuleExportState<'a> {
             self.export_type(res_ty, output)?;
         }
 
-        write!(
-            output,
-            " asm sideeffect \"{asm_template}\", \"{constraints}\"("
-        )
-        .unwrap();
+        write!(output, " asm").unwrap();
+        if sideeffect {
+            write!(output, " sideeffect").unwrap();
+        }
+        let asm_template = format_string_literal(&asm_template);
+        let constraints = format_string_literal(&constraints);
+        write!(output, " {asm_template}, {constraints}(").unwrap();
         for (i, arg) in op_ref.operands().enumerate() {
             if i > 0 {
                 write!(output, ", ").unwrap();
