@@ -50,6 +50,8 @@ pub struct CollectedFunction {
     pub is_kernel: bool,
     /// The name to export in PTX. For kernels, this is the user-visible name.
     pub export_name: String,
+    /// rustc MIR source-scope data used to build inlined debug scopes.
+    pub debug_source_scopes: Option<llvm_export::ops::DebugSourceScopeMap>,
     /// True if the function is marked `#[inline(always)]` in rustc's
     /// `CodegenFnAttrs`. The stable_mir API does not expose inline hints, so
     /// this is queried via `rustc_middle::TyCtxt::codegen_fn_attrs` in
@@ -283,6 +285,7 @@ pub fn run_pipeline(
             Some(&func.export_name),
             &mut legaliser,
             config.debug_kind,
+            func.debug_source_scopes.as_ref(),
         )
         .map_err(|e| {
             // Use .disp(&ctx) for rich error formatting with location and backtrace
@@ -322,14 +325,20 @@ pub fn run_pipeline(
     }
 
     // Step 4.5: Run mem2reg (promote `mir.alloca` + `mir.load`/`mir.store`
-    // chains back to SSA values). Full debug deliberately skips this first:
-    // the initial variable-info implementation emits `dbg.declare` against
-    // local slots, so erasing those slots would make the debug locations false.
-    // A later optimized-debug stage can teach Pliron mem2reg to rewrite those
-    // locations into `dbg.value`, like LLVM's mem2reg does.
+    // chains back to SSA values).
+    //
+    // Full-debug is a `-G`-style build: we keep every source local in its stack
+    // slot so cuda-gdb can read it from a stable memory location for the whole
+    // scope (via `llvm.dbg.declare`). Promoting locals to SSA would narrow each
+    // variable's inspectable range to its register's liveness, which is why an
+    // optimized `dbg.value` build shows `<optimized out>` for in-scope locals.
+    // We therefore skip mem2reg whenever variable info is requested. The
+    // promotion-aware `mir.dbg_value` salvage (see `dialect-mir::ops::debug`)
+    // remains the mechanism for any future optimized-debug tier that *does*
+    // promote.
     if config.debug_kind.variables_enabled() {
         if config.verbose {
-            eprintln!("\n=== Skipping mem2reg (full device debug preserves local slots) ===");
+            eprintln!("\n=== Skipping mem2reg (full debug keeps locals in memory) ===");
         }
     } else {
         if config.verbose {
@@ -1092,10 +1101,20 @@ fn generate_ptx(
     // intentionally reads the original (pre-opt) IR so the target is
     // determined by what the source actually needs, not what opt elides.
     //
-    // Full debug still reaches this point as real LLVM debug intrinsics.
-    // LLVM's optimizer knows how to salvage many `dbg.declare` slot locations
-    // into optimized `dbg.value`/debug-record locations, unlike Pliron mem2reg.
-    let optimized = optimize_ll(ll_path, &toolchain, verbose);
+    // Full-debug is a `-G`-style build: it keeps every local in memory and
+    // describes it with `llvm.dbg.declare`. Running `opt -O2` would promote
+    // those slots to registers and collapse their live ranges, turning most
+    // in-scope locals into `<optimized out>` under cuda-gdb. So we feed the
+    // unoptimized IR straight to llc when variable info is requested, matching
+    // nvcc `-G`. (llc itself is invoked at `-O0` for the same builds below.)
+    let optimized = if debug_kind.variables_enabled() {
+        if verbose {
+            eprintln!("Skipping opt -O2 (full debug keeps locals inspectable)");
+        }
+        None
+    } else {
+        optimize_ll(ll_path, &toolchain, verbose)
+    };
     let llc_input: &Path = optimized.as_deref().unwrap_or(ll_path);
 
     // Target reference:
@@ -1119,13 +1138,17 @@ fn generate_ptx(
         format!("llc ({})", toolchain.llc_path)
     };
 
-    let result = std::process::Command::new(&toolchain.llc_path)
+    let mut llc_cmd = std::process::Command::new(&toolchain.llc_path);
+    llc_cmd
         .arg("-march=nvptx64")
-        .arg(format!("-mcpu={}", target))
-        .arg(llc_input)
-        .arg("-o")
-        .arg(ptx_path)
-        .output();
+        .arg(format!("-mcpu={}", target));
+    // Full-debug (`-G`-style): run llc at -O0 so its own mem2reg/SROA does not
+    // promote the stack slots we deliberately kept in memory, which would
+    // invalidate the `llvm.dbg.declare` locations cuda-gdb reads.
+    if debug_kind.variables_enabled() {
+        llc_cmd.arg("-O0");
+    }
+    let result = llc_cmd.arg(llc_input).arg("-o").arg(ptx_path).output();
 
     match result {
         Ok(output) if output.status.success() => {

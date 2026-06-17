@@ -104,6 +104,12 @@ enum Commands {
     Debug {
         /// Example name (required in workspace, optional for standalone projects)
         example: Option<String>,
+        /// Target architecture (e.g., sm_90, sm_100, sm_120). When omitted,
+        /// `debug` auto-detects the compute capability of CUDA device 0 so the
+        /// generated module loads on the local GPU; set `CUDA_OXIDE_TARGET`
+        /// in the environment for a non-interactive override.
+        #[arg(long)]
+        arch: Option<String>,
         /// Use cgdb frontend (better source view, vim keys)
         #[arg(long)]
         cgdb: bool,
@@ -197,10 +203,15 @@ fn main() {
             validate_nvvm_ir_arch(&example, emit_nvvm_ir, &arch);
             commands::codegen_show_pipeline(&ctx, &example, emit_nvvm_ir, arch.as_deref());
         }
-        Commands::Debug { example, cgdb, tui } => {
+        Commands::Debug {
+            example,
+            arch,
+            cgdb,
+            tui,
+        } => {
             let ctx = commands::resolve_context();
             let example = resolve_example_name(example, &ctx, "debug");
-            commands::codegen_debug(&ctx, &example, cgdb, tui);
+            commands::codegen_debug(&ctx, &example, arch.as_deref(), cgdb, tui);
         }
         Commands::Fmt { check } => {
             let ctx = commands::resolve_context();

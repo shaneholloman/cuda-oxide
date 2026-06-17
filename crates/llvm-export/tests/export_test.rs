@@ -11,8 +11,9 @@ use llvm_export::{
     },
     ops::{
         AddressOfOp, AllocaOp, BrOp, CallOp, ConstantOp, DebugLocalTypeKind,
-        DebugLocalVariableInfo, FuncOp, GepIndex, GetElementPtrOp, GlobalOp, InlineAsmOp, LoadOp,
-        ReturnOp, StoreOp,
+        DebugLocalVariableInfo, DebugSourcePosition, DebugSourceScope, DebugSourceScopeLocation,
+        DebugSourceScopeMap, DebugValueOp, FuncOp, GepIndex, GetElementPtrOp, GlobalOp,
+        InlineAsmOp, LoadOp, ReturnOp, StoreOp,
     },
     types::{FuncType, PointerType, VoidType},
 };
@@ -727,6 +728,93 @@ fn debug_metadata_shares_allocator_with_nvvm_metadata() {
 }
 
 #[test]
+fn debug_locations_use_rustc_source_scope_positions() {
+    let mut ctx = Context::new();
+
+    let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+    let module_region = module.get_operation().deref(&ctx).get_region(0);
+    let module_block = {
+        let region = module_region.deref(&ctx);
+        region.iter(&ctx).next().unwrap()
+    };
+
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&mut ctx, void_ty.to_ptr(), vec![], false);
+    let func = FuncOp::new(&mut ctx, "debug_kernel".try_into().unwrap(), func_ty);
+    let func_loc = src_location(&mut ctx, "/tmp/cuda-oxide/tests/kernel.rs", 10, 1);
+    func.get_operation().deref_mut(&ctx).set_loc(func_loc);
+    llvm_export::ops::set_debug_source_scope_map(
+        &mut ctx,
+        func.get_operation(),
+        &DebugSourceScopeMap {
+            scopes: vec![
+                DebugSourceScope {
+                    id: 0,
+                    parent: None,
+                    span: Some(DebugSourcePosition {
+                        file: PathBuf::from("/tmp/cuda-oxide/tests/kernel.rs"),
+                        line: 10,
+                        column: 1,
+                    }),
+                    inlined: None,
+                },
+                DebugSourceScope {
+                    id: 1,
+                    parent: Some(0),
+                    span: Some(DebugSourcePosition {
+                        file: PathBuf::from("/tmp/cuda-oxide/tests/kernel.rs"),
+                        line: 12,
+                        column: 9,
+                    }),
+                    inlined: None,
+                },
+            ],
+            locations: vec![DebugSourceScopeLocation {
+                pos: DebugSourcePosition {
+                    file: PathBuf::from("/tmp/cuda-oxide/tests/kernel.rs"),
+                    line: 12,
+                    column: 9,
+                },
+                scope: 1,
+            }],
+        },
+    );
+
+    let entry = func.get_or_create_entry_block(&mut ctx);
+    let ret = ReturnOp::new(&mut ctx, None);
+    let ret_loc = src_location(&mut ctx, "/tmp/cuda-oxide/tests/kernel.rs", 12, 9);
+    ret.get_operation().deref_mut(&ctx).set_loc(ret_loc);
+    ret.get_operation().insert_at_back(entry, &ctx);
+    func.get_operation().insert_at_back(module_block, &ctx);
+
+    let config = DebugConfig {
+        inner: PtxExportConfig,
+        debug_kind: DebugKind::LineTables,
+    };
+    let ir =
+        export_module_to_string_with_config(&ctx, &module, &config).expect("debug export succeeds");
+
+    let block_id = ir
+        .lines()
+        .find_map(|line| {
+            if line.contains("!DILexicalBlock(scope: !") && line.contains("line: 12, column: 9") {
+                line.split_once(" = ")
+                    .map(|(id, _)| id.trim_start_matches('!').to_string())
+            } else {
+                None
+            }
+        })
+        .expect("nested lexical block should be emitted");
+
+    assert!(
+        ir.contains(&format!(
+            "!DILocation(line: 12, column: 9, scope: !{block_id})"
+        )),
+        "instruction location should use the exact rustc source scope, not the function scope:\n{ir}"
+    );
+}
+
+#[test]
 fn full_debug_metadata_emits_dbg_declare_for_tagged_allocas() {
     let mut ctx = Context::new();
 
@@ -912,6 +1000,226 @@ fn full_debug_metadata_uses_file_scope_for_cross_file_local_variables() {
     assert!(
         ir.contains("call void @llvm.dbg.declare"),
         "cross-file local variables should still get dbg.declare bindings:\n{ir}"
+    );
+}
+
+#[test]
+fn full_debug_metadata_emits_dbg_value_for_promoted_locals() {
+    let mut ctx = Context::new();
+
+    let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+    let module_region = module.get_operation().deref(&ctx).get_region(0);
+    let module_block = {
+        let region = module_region.deref(&ctx);
+        region.iter(&ctx).next().unwrap()
+    };
+
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&mut ctx, void_ty.to_ptr(), vec![i32_ty.into()], false);
+    let func = FuncOp::new(&mut ctx, "debug_kernel".try_into().unwrap(), func_ty);
+    let func_loc = src_location(&mut ctx, "/tmp/cuda-oxide/tests/kernel.rs", 30, 1);
+    func.get_operation().deref_mut(&ctx).set_loc(func_loc);
+
+    let entry = func.get_or_create_entry_block(&mut ctx);
+    let arg = entry.deref(&ctx).get_argument(0);
+    let dbg_value = DebugValueOp::new(&mut ctx, arg);
+    let dbg_loc = src_location(&mut ctx, "/tmp/cuda-oxide/tests/kernel.rs", 31, 13);
+    dbg_value.get_operation().deref_mut(&ctx).set_loc(dbg_loc);
+    llvm_export::ops::set_debug_local_variable(
+        &mut ctx,
+        dbg_value.get_operation(),
+        DebugLocalVariableInfo {
+            name: "x".to_string(),
+            argument_index: Some(1),
+            ty: DebugLocalTypeKind::Basic {
+                name: "i32".to_string(),
+                size_bits: 32,
+                encoding: "DW_ATE_signed",
+            },
+        },
+    );
+    llvm_export::ops::set_debug_local_declaration_location(
+        &mut ctx,
+        dbg_value.get_operation(),
+        PathBuf::from("/tmp/cuda-oxide/tests/declarations.rs"),
+        12,
+        5,
+    );
+    dbg_value.get_operation().insert_at_back(entry, &ctx);
+
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    func.get_operation().insert_at_back(module_block, &ctx);
+
+    let config = DebugConfig {
+        inner: PtxExportConfig,
+        debug_kind: DebugKind::Full,
+    };
+    let ir =
+        export_module_to_string_with_config(&ctx, &module, &config).expect("debug export succeeds");
+
+    assert!(
+        ir.contains("declare void @llvm.dbg.value(metadata, metadata, metadata)"),
+        "full debug should declare dbg.value when it emits one:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @llvm.dbg.value(metadata i32 %v0, metadata !"),
+        "dbg.value should describe the local as the current SSA value:\n{ir}"
+    );
+    assert!(
+        ir.contains("!DILocalVariable(name: \"x\", arg: 1, scope: !"),
+        "dbg.value should preserve formal-argument metadata when the source local is an argument:\n{ir}"
+    );
+    assert!(
+        ir.contains("!DILocalVariable(name: \"x\", arg: 1, scope: !")
+            && ir.contains("file: !")
+            && ir.contains("line: 12"),
+        "DILocalVariable should use the source declaration line, not the dbg.value line:\n{ir}"
+    );
+    assert!(
+        ir.contains("!DILocation(line: 31, column: 13, scope: !"),
+        "dbg.value should still be located at the value's current source point:\n{ir}"
+    );
+    assert!(
+        !ir.contains("llvm.dbg.declare"),
+        "a value-only debug record should not force dbg.declare:\n{ir}"
+    );
+}
+
+#[test]
+fn full_debug_metadata_uses_inlined_callee_scope_for_inlined_arguments() {
+    let mut ctx = Context::new();
+
+    let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+    let module_region = module.get_operation().deref(&ctx).get_region(0);
+    let module_block = {
+        let region = module_region.deref(&ctx);
+        region.iter(&ctx).next().unwrap()
+    };
+
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&mut ctx, void_ty.to_ptr(), vec![i32_ty.into()], false);
+    let func = FuncOp::new(&mut ctx, "caller_kernel".try_into().unwrap(), func_ty);
+    let func_loc = src_location(&mut ctx, "/tmp/cuda-oxide/tests/kernel.rs", 30, 1);
+    func.get_operation().deref_mut(&ctx).set_loc(func_loc);
+    llvm_export::ops::set_debug_source_scope_map(
+        &mut ctx,
+        func.get_operation(),
+        &DebugSourceScopeMap {
+            scopes: vec![
+                DebugSourceScope {
+                    id: 0,
+                    parent: None,
+                    span: Some(DebugSourcePosition {
+                        file: PathBuf::from("/tmp/cuda-oxide/tests/kernel.rs"),
+                        line: 30,
+                        column: 1,
+                    }),
+                    inlined: None,
+                },
+                DebugSourceScope {
+                    id: 1,
+                    parent: Some(0),
+                    span: Some(DebugSourcePosition {
+                        file: PathBuf::from("/tmp/cuda-oxide/tests/helper.rs"),
+                        line: 7,
+                        column: 1,
+                    }),
+                    inlined: Some(llvm_export::ops::DebugInlinedScope {
+                        callee_name: "helper::next".to_string(),
+                        callsite: Some(DebugSourcePosition {
+                            file: PathBuf::from("/tmp/cuda-oxide/tests/kernel.rs"),
+                            line: 41,
+                            column: 13,
+                        }),
+                    }),
+                },
+            ],
+            locations: vec![],
+        },
+    );
+
+    let entry = func.get_or_create_entry_block(&mut ctx);
+    let arg = entry.deref(&ctx).get_argument(0);
+
+    let caller_value = DebugValueOp::new(&mut ctx, arg);
+    let caller_loc = src_location(&mut ctx, "/tmp/cuda-oxide/tests/kernel.rs", 31, 9);
+    caller_value
+        .get_operation()
+        .deref_mut(&ctx)
+        .set_loc(caller_loc);
+    llvm_export::ops::set_debug_local_variable(
+        &mut ctx,
+        caller_value.get_operation(),
+        DebugLocalVariableInfo {
+            name: "data".to_string(),
+            argument_index: Some(1),
+            ty: DebugLocalTypeKind::Basic {
+                name: "i32".to_string(),
+                size_bits: 32,
+                encoding: "DW_ATE_signed",
+            },
+        },
+    );
+    llvm_export::ops::set_debug_local_source_scope(&mut ctx, caller_value.get_operation(), 0);
+    caller_value.get_operation().insert_at_back(entry, &ctx);
+
+    let inlined_value = DebugValueOp::new(&mut ctx, arg);
+    let inlined_loc = src_location(&mut ctx, "/tmp/cuda-oxide/tests/helper.rs", 8, 17);
+    inlined_value
+        .get_operation()
+        .deref_mut(&ctx)
+        .set_loc(inlined_loc);
+    llvm_export::ops::set_debug_local_variable(
+        &mut ctx,
+        inlined_value.get_operation(),
+        DebugLocalVariableInfo {
+            name: "self".to_string(),
+            argument_index: Some(1),
+            ty: DebugLocalTypeKind::Basic {
+                name: "i32".to_string(),
+                size_bits: 32,
+                encoding: "DW_ATE_signed",
+            },
+        },
+    );
+    llvm_export::ops::set_debug_local_source_scope(&mut ctx, inlined_value.get_operation(), 1);
+    inlined_value.get_operation().insert_at_back(entry, &ctx);
+
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    func.get_operation().insert_at_back(module_block, &ctx);
+
+    let config = DebugConfig {
+        inner: PtxExportConfig,
+        debug_kind: DebugKind::Full,
+    };
+    let ir =
+        export_module_to_string_with_config(&ctx, &module, &config).expect("debug export succeeds");
+
+    assert!(
+        ir.contains("distinct !DISubprogram(name: \"caller_kernel\""),
+        "caller should keep its own function debug scope:\n{ir}"
+    );
+    assert!(
+        ir.contains("distinct !DISubprogram(name: \"helper::next\""),
+        "inlined callee should get its own DISubprogram scope:\n{ir}"
+    );
+    assert!(
+        ir.contains("!DILocalVariable(name: \"data\", arg: 1, scope: !"),
+        "caller argument should remain arg #1 in the caller scope:\n{ir}"
+    );
+    assert!(
+        ir.contains("!DILocalVariable(name: \"self\", arg: 1, scope: !"),
+        "inlined callee argument should remain arg #1 in the callee scope:\n{ir}"
+    );
+    assert!(
+        ir.contains("!DILocation(line: 8, column: 17, scope: !") && ir.contains("inlinedAt: !"),
+        "inlined dbg.value location should point at the callee line and caller callsite:\n{ir}"
     );
 }
 

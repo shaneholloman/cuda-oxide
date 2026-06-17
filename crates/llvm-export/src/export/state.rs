@@ -8,7 +8,7 @@
 use pliron::{basic_block::BasicBlock, context::Ptr, value::Value};
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::ops::DebugLocalTypeKind;
+use crate::ops::{DebugLocalTypeKind, DebugLocalVariableInfo, DebugSourceScopeMap};
 
 use super::config::DebugKind;
 
@@ -72,14 +72,32 @@ pub(super) struct ModuleExportState<'a> {
     pub(super) debug_subprogram_fallbacks: HashMap<usize, (i32, i32)>,
     /// `DILexicalBlockFile` nodes keyed by `(parent scope, file path)`.
     pub(super) debug_file_scopes: HashMap<(usize, PathBuf), usize>,
+    /// `DILexicalBlock` nodes keyed by `(parent scope, file, line, column)`.
+    pub(super) debug_lexical_blocks: HashMap<(usize, PathBuf, i32, i32), usize>,
+    /// Inlined callee `DISubprogram` nodes keyed by `(name, file, line)`.
+    pub(super) debug_inlined_subprograms: HashMap<(String, PathBuf, i32), usize>,
+    /// MIR source-scope tables keyed by the owning function `DISubprogram`.
+    pub(super) debug_source_scope_maps: HashMap<usize, DebugSourceScopeMap>,
+    /// Resolved MIR source scopes keyed by `(function DISubprogram, source scope id)`.
+    pub(super) debug_resolved_source_scopes: HashMap<(usize, u32), ResolvedDebugScope>,
     /// `DILocation` nodes keyed by `(scope, line, column, inlined-at location)`.
     pub(super) debug_locations: HashMap<(usize, i32, i32, Option<usize>), usize>,
     /// `DIType` nodes keyed by the simple debug type they describe.
     pub(super) debug_types: HashMap<DebugLocalTypeKind, usize>,
+    /// `DILocalVariable` nodes keyed by scope, source line, and local identity.
+    pub(super) debug_local_variables: HashMap<(usize, PathBuf, i32, DebugLocalVariableInfo), usize>,
     /// Numbered debug metadata definitions, in allocation order.
     pub(super) debug_nodes: Vec<(usize, String)>,
     /// Whether any function emitted `llvm.dbg.declare`.
     pub(super) debug_declare_used: bool,
+    /// Whether any function emitted `llvm.dbg.value`.
+    pub(super) debug_value_used: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ResolvedDebugScope {
+    pub(super) scope: usize,
+    pub(super) inlined_at: Option<usize>,
 }
 
 impl<'a> ModuleExportState<'a> {
@@ -106,10 +124,16 @@ impl<'a> ModuleExportState<'a> {
             debug_subprogram_files: HashMap::new(),
             debug_subprogram_fallbacks: HashMap::new(),
             debug_file_scopes: HashMap::new(),
+            debug_lexical_blocks: HashMap::new(),
+            debug_inlined_subprograms: HashMap::new(),
+            debug_source_scope_maps: HashMap::new(),
+            debug_resolved_source_scopes: HashMap::new(),
             debug_locations: HashMap::new(),
             debug_types: HashMap::new(),
+            debug_local_variables: HashMap::new(),
             debug_nodes: Vec::new(),
             debug_declare_used: false,
+            debug_value_used: false,
         }
     }
 

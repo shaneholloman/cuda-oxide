@@ -27,7 +27,7 @@ use dialect_mir::ops::{
     MirAddOp, MirAllocaOp, MirArrayElementAddrOp, MirAssertOp, MirBitAndOp, MirBitOrOp,
     MirBitXorOp, MirCallOp, MirCastOp, MirCheckedAddOp, MirCheckedMulOp, MirCheckedSubOp, MirCmpOp,
     MirCondBranchOp, MirConstantOp, MirConstructArrayOp, MirConstructEnumOp, MirConstructSliceOp,
-    MirConstructStructOp, MirConstructTupleOp, MirDivOp, MirEnumPayloadOp, MirEqOp,
+    MirConstructStructOp, MirConstructTupleOp, MirDbgValueOp, MirDivOp, MirEnumPayloadOp, MirEqOp,
     MirExtractArrayElementOp, MirExtractFieldOp, MirFieldAddrOp, MirFloatConstantOp, MirGeOp,
     MirGetDiscriminantOp, MirGotoOp, MirGtOp, MirInsertFieldOp, MirLeOp, MirLoadOp, MirLtOp,
     MirMemcpyOp, MirMulOp, MirNeOp, MirNegOp, MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp,
@@ -452,6 +452,18 @@ impl MirToLlvmConversion for MirLoadOp {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::ops::memory::convert_load(ctx, rewriter, self.get_operation(), operands_info)
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MirDbgValueOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::ops::memory::convert_dbg_value(ctx, rewriter, self.get_operation(), operands_info)
     }
 }
 

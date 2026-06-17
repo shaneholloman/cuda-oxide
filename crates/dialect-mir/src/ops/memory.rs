@@ -32,6 +32,7 @@ use pliron_derive::pliron_op;
 
 use crate::attributes::MutabilityAttr;
 use crate::ops::constants::MirUndefOp;
+use crate::ops::debug::debug_value_for_promoted_slot;
 use crate::types::MirPtrType;
 
 type PlironResult<T> = pliron::result::Result<T>;
@@ -318,6 +319,16 @@ impl PromotableOpInterface for MirStoreOp {
                 && self.address_opd(ctx) == alloc_info_reaching_defs[0].0.ptr,
             "AllocInfo does not belong to this MirStoreOp"
         );
+        let (alloc_info, reaching_def) = &alloc_info_reaching_defs[0];
+        let loc = self.get_operation().deref(ctx).loc().clone();
+        // If `reaching_def` is a block argument, we still record the debug
+        // update at this promoted source op. Eager block-entry placement needs
+        // its own source-location policy.
+        if let Some(dbg_value) =
+            debug_value_for_promoted_slot(ctx, alloc_info.ptr, *reaching_def, loc)
+        {
+            rewriter.insert_op(ctx, &dbg_value);
+        }
         rewriter.erase_operation(ctx, self.get_operation());
         Ok(())
     }
@@ -502,7 +513,16 @@ impl PromotableOpInterface for MirLoadOp {
                 && self.address_opd(ctx) == alloc_info_reaching_defs[0].0.ptr,
             "AllocInfo does not belong to this MirLoadOp"
         );
-        let (_, reaching_def) = &alloc_info_reaching_defs[0];
+        let (alloc_info, reaching_def) = &alloc_info_reaching_defs[0];
+        let loc = self.get_operation().deref(ctx).loc().clone();
+        // If `reaching_def` is a block argument, we still record the debug
+        // update at this promoted source op. Eager block-entry placement needs
+        // its own source-location policy.
+        if let Some(dbg_value) =
+            debug_value_for_promoted_slot(ctx, alloc_info.ptr, *reaching_def, loc)
+        {
+            rewriter.insert_op(ctx, &dbg_value);
+        }
         rewriter.replace_operation_with_values(ctx, self.get_operation(), vec![*reaching_def]);
         Ok(())
     }

@@ -127,6 +127,7 @@ enum LlvmOp<'op> {
     Undef(&'op ops::UndefOp),
     Constant(&'op ops::ConstantOp),
     AddressOf(&'op ops::AddressOfOp),
+    DebugValue(&'op ops::DebugValueOp),
 }
 
 /// Try each `(Variant, OpType)` pair in order; return the first match.
@@ -214,6 +215,7 @@ impl<'op> TryFrom<&'op dyn Op> for LlvmOp<'op> {
             Undef        => ops::UndefOp,
             Constant     => ops::ConstantOp,
             AddressOf    => ops::AddressOfOp,
+            DebugValue   => ops::DebugValueOp,
         })
     }
 }
@@ -222,7 +224,7 @@ impl LlvmOp<'_> {
     fn emits_real_instruction(&self) -> bool {
         !matches!(
             self,
-            Self::Undef(_) | Self::Constant(_) | Self::AddressOf(_)
+            Self::Undef(_) | Self::Constant(_) | Self::AddressOf(_) | Self::DebugValue(_)
         )
     }
 
@@ -390,6 +392,9 @@ impl<'a> ModuleExportState<'a> {
             Some(LlvmOp::Undef(op)) => self.emit_undef(op, value_names),
             Some(LlvmOp::Constant(op)) => self.emit_constant(op, value_names),
             Some(LlvmOp::AddressOf(op)) => self.emit_address_of(op, value_names),
+            Some(LlvmOp::DebugValue(op)) => {
+                self.emit_debug_value(op, value_names, debug_scope, &op_loc, output)?
+            }
             // Unknown
             None => writeln!(
                 output,
@@ -566,7 +571,9 @@ impl<'a> ModuleExportState<'a> {
         let Some(info) = crate::ops::debug_local_variable(self.ctx, op.get_operation()) else {
             return Ok(());
         };
-        let Some((var_id, loc_id)) = self.debug_local_variable_for_scope(scope, loc, &info) else {
+        let Some((var_id, loc_id)) =
+            self.debug_local_variable_for_scope(scope, loc, op.get_operation(), &info)
+        else {
             return Ok(());
         };
 
@@ -581,6 +588,45 @@ impl<'a> ModuleExportState<'a> {
         )
         .unwrap();
         self.debug_declare_used = true;
+
+        Ok(())
+    }
+
+    fn emit_debug_value(
+        &mut self,
+        op: &ops::DebugValueOp,
+        value_names: &HashMap<Value, String>,
+        debug_scope: Option<usize>,
+        loc: &pliron::location::Location,
+        output: &mut String,
+    ) -> Result<(), String> {
+        if !self.debug_kind.variables_enabled() {
+            return Ok(());
+        }
+
+        let Some(scope) = debug_scope else {
+            return Ok(());
+        };
+        let Some(info) = crate::ops::debug_local_variable(self.ctx, op.get_operation()) else {
+            return Ok(());
+        };
+        let Some((var_id, loc_id)) =
+            self.debug_local_variable_for_scope(scope, loc, op.get_operation(), &info)
+        else {
+            return Ok(());
+        };
+
+        let value = op.value(self.ctx);
+        write!(output, "  call void @llvm.dbg.value(metadata ").unwrap();
+        self.export_type(value.get_type(self.ctx), output)?;
+        write!(output, " ").unwrap();
+        self.export_value(value, value_names, output)?;
+        writeln!(
+            output,
+            ", metadata !{var_id}, metadata !DIExpression()), !dbg !{loc_id}"
+        )
+        .unwrap();
+        self.debug_value_used = true;
 
         Ok(())
     }

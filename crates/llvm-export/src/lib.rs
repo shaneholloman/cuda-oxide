@@ -134,18 +134,28 @@ pub mod attributes {
 pub mod ops {
     pub use pliron_llvm::ops::*;
 
+    use std::path::PathBuf;
+
+    use combine::stream::position::SourcePosition;
+
     /// `ConstantOp` moved from the LLVM dialect to pliron core `builtin`.
     pub use pliron::builtin::ops::ConstantOp;
 
     use pliron::{
-        builtin::attributes::{BoolAttr, StringAttr},
+        builtin::{
+            attributes::{BoolAttr, StringAttr},
+            op_interfaces::{NOpdsInterface, NResultsInterface, OneOpdInterface},
+        },
+        common_traits::Verify,
         context::{Context, Ptr},
         identifier::Identifier,
         op::Op,
         operation::Operation,
+        result::Error,
         r#type::TypeObj,
         value::Value,
     };
+    use pliron_derive::pliron_op;
     use pliron_llvm::attributes::AlignmentAttr;
     pub use pliron_llvm::ops::{GlobalOp, InlineAsmOp};
 
@@ -201,22 +211,259 @@ pub mod ops {
         },
         /// A pointer/reference `DIDerivedType`.
         Pointer { name: String, size_bits: u64 },
+        /// A struct or tuple `DICompositeType` (`DW_TAG_structure_type`).
+        ///
+        /// Member offsets come from rustc's real layout, not declaration order,
+        /// so this is correct even for `repr(Rust)` field reordering. Tuples are
+        /// modelled as a struct whose members are named `__0`, `__1`, ...
+        Struct {
+            name: String,
+            size_bits: u64,
+            members: Vec<DebugTypeMember>,
+        },
+        /// A fixed-length array `DICompositeType` (`DW_TAG_array_type`).
+        Array {
+            name: String,
+            size_bits: u64,
+            element: Box<DebugLocalTypeKind>,
+            count: u64,
+        },
+    }
+
+    /// One member of a [`DebugLocalTypeKind::Struct`].
+    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+    pub struct DebugTypeMember {
+        pub name: String,
+        /// Byte-offset of the member within its parent, in bits.
+        pub offset_bits: u64,
+        pub ty: DebugLocalTypeKind,
+    }
+
+    impl DebugLocalTypeKind {
+        /// Size of this type in bits, used to fill `DIDerivedType`/member sizes.
+        pub fn size_bits(&self) -> u64 {
+            match self {
+                DebugLocalTypeKind::Basic { size_bits, .. }
+                | DebugLocalTypeKind::Pointer { size_bits, .. }
+                | DebugLocalTypeKind::Struct { size_bits, .. }
+                | DebugLocalTypeKind::Array { size_bits, .. } => *size_bits,
+            }
+        }
+    }
+
+    /// Map a serialized DWARF encoding name back to its `&'static str`.
+    fn debug_encoding_from_str(s: &str) -> Option<&'static str> {
+        match s {
+            "DW_ATE_boolean" => Some("DW_ATE_boolean"),
+            "DW_ATE_float" => Some("DW_ATE_float"),
+            "DW_ATE_signed" => Some("DW_ATE_signed"),
+            "DW_ATE_unsigned" => Some("DW_ATE_unsigned"),
+            _ => None,
+        }
+    }
+
+    /// Serialize a type tree into a compact, escape-safe string.
+    ///
+    /// Strings are length-prefixed (`<byte-len> <bytes>`) so arbitrary type
+    /// names (`&[u32]`, `Foo<'_, u64>`) round-trip without delimiter escaping.
+    /// Numbers are space-terminated. This is the value stored under
+    /// [`DEBUG_LOCAL_TYPE_KEY`]; the reader is [`deserialize_debug_type`].
+    fn serialize_debug_type(ty: &DebugLocalTypeKind, out: &mut String) {
+        fn put_u64(out: &mut String, n: u64) {
+            out.push_str(&n.to_string());
+            out.push(' ');
+        }
+        fn put_str(out: &mut String, s: &str) {
+            put_u64(out, s.len() as u64);
+            out.push_str(s);
+        }
+        match ty {
+            DebugLocalTypeKind::Basic {
+                name,
+                size_bits,
+                encoding,
+            } => {
+                out.push('b');
+                put_u64(out, *size_bits);
+                put_str(out, encoding);
+                put_str(out, name);
+            }
+            DebugLocalTypeKind::Pointer { name, size_bits } => {
+                out.push('p');
+                put_u64(out, *size_bits);
+                put_str(out, name);
+            }
+            DebugLocalTypeKind::Struct {
+                name,
+                size_bits,
+                members,
+            } => {
+                out.push('s');
+                put_u64(out, *size_bits);
+                put_str(out, name);
+                put_u64(out, members.len() as u64);
+                for member in members {
+                    put_str(out, &member.name);
+                    put_u64(out, member.offset_bits);
+                    serialize_debug_type(&member.ty, out);
+                }
+            }
+            DebugLocalTypeKind::Array {
+                name,
+                size_bits,
+                element,
+                count,
+            } => {
+                out.push('a');
+                put_u64(out, *size_bits);
+                put_str(out, name);
+                put_u64(out, *count);
+                serialize_debug_type(element, out);
+            }
+        }
+    }
+
+    /// Reverse of [`serialize_debug_type`]. Returns `None` on malformed input.
+    fn deserialize_debug_type(bytes: &[u8], pos: &mut usize) -> Option<DebugLocalTypeKind> {
+        fn take_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
+            let start = *pos;
+            while *pos < bytes.len() && bytes[*pos] != b' ' {
+                *pos += 1;
+            }
+            let n: u64 = std::str::from_utf8(&bytes[start..*pos])
+                .ok()?
+                .parse()
+                .ok()?;
+            *pos += 1; // consume the space
+            Some(n)
+        }
+        fn take_str(bytes: &[u8], pos: &mut usize) -> Option<String> {
+            let len = take_u64(bytes, pos)? as usize;
+            let end = pos.checked_add(len)?;
+            if end > bytes.len() {
+                return None;
+            }
+            let s = std::str::from_utf8(&bytes[*pos..end]).ok()?.to_string();
+            *pos = end;
+            Some(s)
+        }
+
+        let tag = *bytes.get(*pos)?;
+        *pos += 1;
+        match tag {
+            b'b' => {
+                let size_bits = take_u64(bytes, pos)?;
+                let encoding = debug_encoding_from_str(&take_str(bytes, pos)?)?;
+                let name = take_str(bytes, pos)?;
+                Some(DebugLocalTypeKind::Basic {
+                    name,
+                    size_bits,
+                    encoding,
+                })
+            }
+            b'p' => {
+                let size_bits = take_u64(bytes, pos)?;
+                let name = take_str(bytes, pos)?;
+                Some(DebugLocalTypeKind::Pointer { name, size_bits })
+            }
+            b's' => {
+                let size_bits = take_u64(bytes, pos)?;
+                let name = take_str(bytes, pos)?;
+                let member_count = take_u64(bytes, pos)? as usize;
+                let mut members = Vec::with_capacity(member_count);
+                for _ in 0..member_count {
+                    let member_name = take_str(bytes, pos)?;
+                    let offset_bits = take_u64(bytes, pos)?;
+                    let ty = deserialize_debug_type(bytes, pos)?;
+                    members.push(DebugTypeMember {
+                        name: member_name,
+                        offset_bits,
+                        ty,
+                    });
+                }
+                Some(DebugLocalTypeKind::Struct {
+                    name,
+                    size_bits,
+                    members,
+                })
+            }
+            b'a' => {
+                let size_bits = take_u64(bytes, pos)?;
+                let name = take_str(bytes, pos)?;
+                let count = take_u64(bytes, pos)?;
+                let element = Box::new(deserialize_debug_type(bytes, pos)?);
+                Some(DebugLocalTypeKind::Array {
+                    name,
+                    size_bits,
+                    element,
+                    count,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Debug metadata attached to the alloca that stores a source local.
-    #[derive(Clone, Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
     pub struct DebugLocalVariableInfo {
         pub name: String,
         pub argument_index: Option<u16>,
         pub ty: DebugLocalTypeKind,
     }
 
+    /// A source position small enough to carry through cuda-oxide attrs.
+    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+    pub struct DebugSourcePosition {
+        pub file: PathBuf,
+        pub line: i32,
+        pub column: i32,
+    }
+
+    /// Extra scope information rustc records for MIR inlining.
+    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+    pub struct DebugInlinedScope {
+        pub callee_name: String,
+        pub callsite: Option<DebugSourcePosition>,
+    }
+
+    /// One rustc MIR `SourceScope`, flattened into stable data.
+    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+    pub struct DebugSourceScope {
+        pub id: u32,
+        pub parent: Option<u32>,
+        pub span: Option<DebugSourcePosition>,
+        pub inlined: Option<DebugInlinedScope>,
+    }
+
+    /// The original rustc MIR source scope for a statement or terminator span.
+    ///
+    /// stable MIR currently exposes the span, but not the `SourceScope`, on
+    /// statements and terminators. The rustc-codegen bridge records that
+    /// pairing before the stable-MIR conversion so instruction `!dbg` scopes
+    /// can match the lexical scopes used by local variables.
+    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+    pub struct DebugSourceScopeLocation {
+        pub pos: DebugSourcePosition,
+        pub scope: u32,
+    }
+
+    /// The source-scope table for one function body.
+    #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+    pub struct DebugSourceScopeMap {
+        pub scopes: Vec<DebugSourceScope>,
+        pub locations: Vec<DebugSourceScopeLocation>,
+    }
+
     const DEBUG_LOCAL_NAME_KEY: &str = "cuda_oxide_debug_local_name";
     const DEBUG_LOCAL_ARG_KEY: &str = "cuda_oxide_debug_local_arg";
-    const DEBUG_LOCAL_TYPE_KIND_KEY: &str = "cuda_oxide_debug_local_type_kind";
-    const DEBUG_LOCAL_TYPE_NAME_KEY: &str = "cuda_oxide_debug_local_type_name";
-    const DEBUG_LOCAL_TYPE_SIZE_KEY: &str = "cuda_oxide_debug_local_type_size_bits";
-    const DEBUG_LOCAL_TYPE_ENCODING_KEY: &str = "cuda_oxide_debug_local_type_encoding";
+    /// The whole source-local type tree, serialized by [`serialize_debug_type`].
+    const DEBUG_LOCAL_TYPE_KEY: &str = "cuda_oxide_debug_local_type";
+    const DEBUG_LOCAL_DECL_FILE_KEY: &str = "cuda_oxide_debug_local_decl_file";
+    const DEBUG_LOCAL_DECL_LINE_KEY: &str = "cuda_oxide_debug_local_decl_line";
+    const DEBUG_LOCAL_DECL_COLUMN_KEY: &str = "cuda_oxide_debug_local_decl_column";
+    const DEBUG_LOCAL_SCOPE_KEY: &str = "cuda_oxide_debug_local_scope";
+    const DEBUG_SOURCE_SCOPE_COUNT_KEY: &str = "cuda_oxide_debug_scope_count";
+    const DEBUG_SOURCE_SCOPE_LOCATION_COUNT_KEY: &str = "cuda_oxide_debug_scope_location_count";
     /// Op-attribute key for ordinary volatile `load` / `store` operations.
     const OP_VOLATILE_KEY: &str = "cuda_oxide_op_volatile";
 
@@ -266,23 +513,9 @@ pub mod ops {
             set_string_attr(ctx, op, DEBUG_LOCAL_ARG_KEY, arg.to_string());
         }
 
-        match info.ty {
-            DebugLocalTypeKind::Basic {
-                name,
-                size_bits,
-                encoding,
-            } => {
-                set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_KIND_KEY, "basic".to_string());
-                set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_NAME_KEY, name);
-                set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_SIZE_KEY, size_bits.to_string());
-                set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_ENCODING_KEY, encoding.to_string());
-            }
-            DebugLocalTypeKind::Pointer { name, size_bits } => {
-                set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_KIND_KEY, "pointer".to_string());
-                set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_NAME_KEY, name);
-                set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_SIZE_KEY, size_bits.to_string());
-            }
-        }
+        let mut encoded = String::new();
+        serialize_debug_type(&info.ty, &mut encoded);
+        set_string_attr(ctx, op, DEBUG_LOCAL_TYPE_KEY, encoded);
     }
 
     /// Read source-local debug metadata from a memory slot op, if present.
@@ -293,30 +526,296 @@ pub mod ops {
         let name = get_string_attr(ctx, op, DEBUG_LOCAL_NAME_KEY)?;
         let argument_index =
             get_string_attr(ctx, op, DEBUG_LOCAL_ARG_KEY).and_then(|arg| arg.parse::<u16>().ok());
-        let kind = get_string_attr(ctx, op, DEBUG_LOCAL_TYPE_KIND_KEY)?;
-        let type_name = get_string_attr(ctx, op, DEBUG_LOCAL_TYPE_NAME_KEY)?;
-        let size_bits = get_string_attr(ctx, op, DEBUG_LOCAL_TYPE_SIZE_KEY)?
-            .parse()
-            .ok()?;
-
-        let ty = match kind.as_str() {
-            "basic" => DebugLocalTypeKind::Basic {
-                name: type_name,
-                size_bits,
-                encoding: debug_type_encoding(ctx, op)?,
-            },
-            "pointer" => DebugLocalTypeKind::Pointer {
-                name: type_name,
-                size_bits,
-            },
-            _ => return None,
-        };
+        let encoded = get_string_attr(ctx, op, DEBUG_LOCAL_TYPE_KEY)?;
+        let ty = deserialize_debug_type(encoded.as_bytes(), &mut 0)?;
 
         Some(DebugLocalVariableInfo {
             name,
             argument_index,
             ty,
         })
+    }
+
+    /// Attach the MIR source-scope id that owns this source local.
+    pub fn set_debug_local_source_scope(ctx: &mut Context, op: Ptr<Operation>, scope: u32) {
+        set_string_attr(ctx, op, DEBUG_LOCAL_SCOPE_KEY, scope.to_string());
+    }
+
+    /// Read the MIR source-scope id that owns this source local.
+    pub fn debug_local_source_scope(ctx: &Context, op: Ptr<Operation>) -> Option<u32> {
+        get_string_attr(ctx, op, DEBUG_LOCAL_SCOPE_KEY).and_then(|scope| scope.parse().ok())
+    }
+
+    /// Attach a function's MIR source-scope table.
+    pub fn set_debug_source_scope_map(
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        map: &DebugSourceScopeMap,
+    ) {
+        // The reader (`debug_source_scope_map`) reconstructs scope ids as
+        // `0..count`, so the writer's per-scope attr keys must use exactly those
+        // ids. rustc's `SourceScope` indices are dense `0..len`, which makes this
+        // hold today. Assert it so a future sparse/reordered producer fails
+        // loudly here instead of silently mislabeling parent/scope links.
+        debug_assert!(
+            map.scopes
+                .iter()
+                .enumerate()
+                .all(|(idx, scope)| scope.id as usize == idx),
+            "DebugSourceScopeMap scope ids must be dense 0..len to round-trip"
+        );
+        set_string_attr(
+            ctx,
+            op,
+            DEBUG_SOURCE_SCOPE_COUNT_KEY,
+            map.scopes.len().to_string(),
+        );
+        set_string_attr(
+            ctx,
+            op,
+            DEBUG_SOURCE_SCOPE_LOCATION_COUNT_KEY,
+            map.locations.len().to_string(),
+        );
+
+        for scope in &map.scopes {
+            let id = scope.id;
+            if let Some(parent) = scope.parent {
+                set_string_attr(ctx, op, &debug_scope_key(id, "parent"), parent.to_string());
+            }
+            if let Some(span) = &scope.span {
+                set_debug_position_attrs(ctx, op, id, "span", span);
+            }
+            if let Some(inlined) = &scope.inlined {
+                set_string_attr(
+                    ctx,
+                    op,
+                    &debug_scope_key(id, "callee"),
+                    inlined.callee_name.clone(),
+                );
+                if let Some(callsite) = &inlined.callsite {
+                    set_debug_position_attrs(ctx, op, id, "callsite", callsite);
+                }
+            }
+        }
+
+        for (idx, location) in map.locations.iter().enumerate() {
+            set_string_attr(
+                ctx,
+                op,
+                &debug_scope_location_key(idx, "scope"),
+                location.scope.to_string(),
+            );
+            set_debug_scope_location_position_attrs(ctx, op, idx, &location.pos);
+        }
+    }
+
+    /// Read a function's MIR source-scope table.
+    pub fn debug_source_scope_map(
+        ctx: &Context,
+        op: Ptr<Operation>,
+    ) -> Option<DebugSourceScopeMap> {
+        let count = get_string_attr(ctx, op, DEBUG_SOURCE_SCOPE_COUNT_KEY)?
+            .parse()
+            .ok()?;
+        let mut scopes = Vec::with_capacity(count);
+
+        for id in 0..count as u32 {
+            let parent = get_string_attr(ctx, op, &debug_scope_key(id, "parent"))
+                .and_then(|v| v.parse().ok());
+            let span = debug_position_attrs(ctx, op, id, "span");
+            let inlined = get_string_attr(ctx, op, &debug_scope_key(id, "callee")).map(|name| {
+                DebugInlinedScope {
+                    callee_name: name,
+                    callsite: debug_position_attrs(ctx, op, id, "callsite"),
+                }
+            });
+            scopes.push(DebugSourceScope {
+                id,
+                parent,
+                span,
+                inlined,
+            });
+        }
+
+        let location_count = get_string_attr(ctx, op, DEBUG_SOURCE_SCOPE_LOCATION_COUNT_KEY)
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(0);
+        let mut locations = Vec::with_capacity(location_count);
+
+        for idx in 0..location_count {
+            let scope = get_string_attr(ctx, op, &debug_scope_location_key(idx, "scope"))
+                .and_then(|v| v.parse().ok())?;
+            let pos = debug_scope_location_position_attrs(ctx, op, idx)?;
+            locations.push(DebugSourceScopeLocation { pos, scope });
+        }
+
+        Some(DebugSourceScopeMap { scopes, locations })
+    }
+
+    /// Copy debug source-scope attrs from one operation to another.
+    pub fn copy_debug_source_scope_map(
+        ctx: &mut Context,
+        from: Ptr<Operation>,
+        to: Ptr<Operation>,
+    ) {
+        let Some(map) = debug_source_scope_map(ctx, from) else {
+            return;
+        };
+        set_debug_source_scope_map(ctx, to, &map);
+    }
+
+    /// Read an optional source declaration location for a debug local.
+    ///
+    /// Promoted `dbg.value` records have two useful locations: the operation
+    /// location where the value is current, and the source declaration location
+    /// for the `DILocalVariable`. This helper returns the latter when it was
+    /// preserved during MIR mem2reg promotion.
+    pub fn debug_local_declaration_location(
+        ctx: &Context,
+        op: Ptr<Operation>,
+    ) -> Option<(PathBuf, SourcePosition)> {
+        let file = PathBuf::from(get_string_attr(ctx, op, DEBUG_LOCAL_DECL_FILE_KEY)?);
+        let line = get_string_attr(ctx, op, DEBUG_LOCAL_DECL_LINE_KEY)?
+            .parse()
+            .ok()?;
+        let column = get_string_attr(ctx, op, DEBUG_LOCAL_DECL_COLUMN_KEY)?
+            .parse()
+            .ok()?;
+        if line <= 0 || column <= 0 {
+            return None;
+        }
+
+        Some((file, SourcePosition { line, column }))
+    }
+
+    /// Attach the source declaration location for a debug local.
+    pub fn set_debug_local_declaration_location(
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        file: PathBuf,
+        line: i32,
+        column: i32,
+    ) {
+        set_string_attr(
+            ctx,
+            op,
+            DEBUG_LOCAL_DECL_FILE_KEY,
+            file.to_string_lossy().into_owned(),
+        );
+        set_string_attr(ctx, op, DEBUG_LOCAL_DECL_LINE_KEY, line.to_string());
+        set_string_attr(ctx, op, DEBUG_LOCAL_DECL_COLUMN_KEY, column.to_string());
+    }
+
+    fn set_debug_position_attrs(
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        scope: u32,
+        prefix: &str,
+        pos: &DebugSourcePosition,
+    ) {
+        set_string_attr(
+            ctx,
+            op,
+            &debug_scope_key(scope, &format!("{prefix}_file")),
+            pos.file.to_string_lossy().into_owned(),
+        );
+        set_string_attr(
+            ctx,
+            op,
+            &debug_scope_key(scope, &format!("{prefix}_line")),
+            pos.line.to_string(),
+        );
+        set_string_attr(
+            ctx,
+            op,
+            &debug_scope_key(scope, &format!("{prefix}_column")),
+            pos.column.to_string(),
+        );
+    }
+
+    fn debug_position_attrs(
+        ctx: &Context,
+        op: Ptr<Operation>,
+        scope: u32,
+        prefix: &str,
+    ) -> Option<DebugSourcePosition> {
+        let file = PathBuf::from(get_string_attr(
+            ctx,
+            op,
+            &debug_scope_key(scope, &format!("{prefix}_file")),
+        )?);
+        let line = get_string_attr(ctx, op, &debug_scope_key(scope, &format!("{prefix}_line")))?
+            .parse()
+            .ok()?;
+        let column = get_string_attr(
+            ctx,
+            op,
+            &debug_scope_key(scope, &format!("{prefix}_column")),
+        )?
+        .parse()
+        .ok()?;
+        if line <= 0 || column <= 0 {
+            return None;
+        }
+
+        Some(DebugSourcePosition { file, line, column })
+    }
+
+    fn set_debug_scope_location_position_attrs(
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        idx: usize,
+        pos: &DebugSourcePosition,
+    ) {
+        set_string_attr(
+            ctx,
+            op,
+            &debug_scope_location_key(idx, "file"),
+            pos.file.to_string_lossy().into_owned(),
+        );
+        set_string_attr(
+            ctx,
+            op,
+            &debug_scope_location_key(idx, "line"),
+            pos.line.to_string(),
+        );
+        set_string_attr(
+            ctx,
+            op,
+            &debug_scope_location_key(idx, "column"),
+            pos.column.to_string(),
+        );
+    }
+
+    fn debug_scope_location_position_attrs(
+        ctx: &Context,
+        op: Ptr<Operation>,
+        idx: usize,
+    ) -> Option<DebugSourcePosition> {
+        let file = PathBuf::from(get_string_attr(
+            ctx,
+            op,
+            &debug_scope_location_key(idx, "file"),
+        )?);
+        let line = get_string_attr(ctx, op, &debug_scope_location_key(idx, "line"))?
+            .parse()
+            .ok()?;
+        let column = get_string_attr(ctx, op, &debug_scope_location_key(idx, "column"))?
+            .parse()
+            .ok()?;
+        if line <= 0 || column <= 0 {
+            return None;
+        }
+
+        Some(DebugSourcePosition { file, line, column })
+    }
+
+    fn debug_scope_key(scope: u32, field: &str) -> String {
+        format!("cuda_oxide_debug_scope_{scope}_{field}")
+    }
+
+    fn debug_scope_location_key(idx: usize, field: &str) -> String {
+        format!("cuda_oxide_debug_scope_location_{idx}_{field}")
     }
 
     fn set_string_attr(ctx: &mut Context, op: Ptr<Operation>, key: &str, value: String) {
@@ -334,13 +833,39 @@ pub mod ops {
             .map(|a| String::from((*a).clone()))
     }
 
-    fn debug_type_encoding(ctx: &Context, op: Ptr<Operation>) -> Option<&'static str> {
-        match get_string_attr(ctx, op, DEBUG_LOCAL_TYPE_ENCODING_KEY)?.as_str() {
-            "DW_ATE_boolean" => Some("DW_ATE_boolean"),
-            "DW_ATE_float" => Some("DW_ATE_float"),
-            "DW_ATE_signed" => Some("DW_ATE_signed"),
-            "DW_ATE_unsigned" => Some("DW_ATE_unsigned"),
-            _ => None,
+    /// LLVM debug-value marker used by the textual exporter.
+    ///
+    /// This is not a runtime instruction. It lowers to an `llvm.dbg.value`
+    /// intrinsic call that tells LLVM/DWARF where a source local lives after a
+    /// MIR stack slot has been promoted to an SSA value.
+    #[pliron_op(
+        name = "llvm.dbg_value",
+        format,
+        interfaces = [NOpdsInterface<1>, OneOpdInterface, NResultsInterface<0>]
+    )]
+    pub struct DebugValueOp;
+
+    impl DebugValueOp {
+        pub fn new(ctx: &mut Context, value: Value) -> Self {
+            let op = Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![],
+                vec![value],
+                vec![],
+                0,
+            );
+            DebugValueOp { op }
+        }
+
+        pub fn value(&self, ctx: &Context) -> Value {
+            self.get_operation().deref(ctx).get_operand(0)
+        }
+    }
+
+    impl Verify for DebugValueOp {
+        fn verify(&self, _ctx: &Context) -> Result<(), Error> {
+            Ok(())
         }
     }
 
@@ -402,6 +927,91 @@ pub mod ops {
                 .attributes
                 .get::<AlignmentAttr>(&key)
                 .map(|a| a.0 as u64)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            DebugLocalTypeKind, DebugTypeMember, deserialize_debug_type, serialize_debug_type,
+        };
+
+        fn round_trip(ty: &DebugLocalTypeKind) -> DebugLocalTypeKind {
+            let mut encoded = String::new();
+            serialize_debug_type(ty, &mut encoded);
+            let mut pos = 0;
+            let decoded =
+                deserialize_debug_type(encoded.as_bytes(), &mut pos).expect("decode succeeds");
+            assert_eq!(pos, encoded.len(), "decoder consumed the whole blob");
+            decoded
+        }
+
+        #[test]
+        fn round_trips_nested_composites() {
+            // A struct whose members include a basic, a pointer, a fixed array,
+            // and a nested tuple-as-struct: exercises every variant + recursion.
+            let ty = DebugLocalTypeKind::Struct {
+                name: "Frame<'_, u64>".to_string(),
+                size_bits: 256,
+                members: vec![
+                    DebugTypeMember {
+                        name: "len".to_string(),
+                        offset_bits: 0,
+                        ty: DebugLocalTypeKind::Basic {
+                            name: "usize".to_string(),
+                            size_bits: 64,
+                            encoding: "DW_ATE_unsigned",
+                        },
+                    },
+                    DebugTypeMember {
+                        name: "data".to_string(),
+                        offset_bits: 64,
+                        ty: DebugLocalTypeKind::Pointer {
+                            name: "*mut u64".to_string(),
+                            size_bits: 64,
+                        },
+                    },
+                    DebugTypeMember {
+                        name: "lanes".to_string(),
+                        offset_bits: 128,
+                        ty: DebugLocalTypeKind::Array {
+                            name: "[u32; 2]".to_string(),
+                            size_bits: 64,
+                            element: Box::new(DebugLocalTypeKind::Basic {
+                                name: "u32".to_string(),
+                                size_bits: 32,
+                                encoding: "DW_ATE_signed",
+                            }),
+                            count: 2,
+                        },
+                    },
+                ],
+            };
+            assert_eq!(round_trip(&ty), ty);
+        }
+
+        #[test]
+        fn round_trips_names_with_delimiters() {
+            // Length-prefixing must survive names containing spaces/digits/braces.
+            let ty = DebugLocalTypeKind::Pointer {
+                name: "&[(u32, u32); 4] {x: 1}".to_string(),
+                size_bits: 64,
+            };
+            assert_eq!(round_trip(&ty), ty);
+        }
+
+        #[test]
+        fn rejects_truncated_blob() {
+            let ty = DebugLocalTypeKind::Basic {
+                name: "u32".to_string(),
+                size_bits: 32,
+                encoding: "DW_ATE_unsigned",
+            };
+            let mut encoded = String::new();
+            serialize_debug_type(&ty, &mut encoded);
+            encoded.truncate(encoded.len() - 1);
+            let mut pos = 0;
+            assert!(deserialize_debug_type(encoded.as_bytes(), &mut pos).is_none());
         }
     }
 }

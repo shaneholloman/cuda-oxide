@@ -27,7 +27,9 @@ use crate::translator::values::{self, SlotAddrSpaceMap, ValueMap};
 use dialect_mir::ops::MirFuncOp;
 use dialect_mir::types::address_space;
 use llvm_export::export::DebugKind;
-use llvm_export::ops::{DebugLocalTypeKind, DebugLocalVariableInfo};
+use llvm_export::ops::{
+    DebugLocalTypeKind, DebugLocalVariableInfo, DebugSourceScopeMap, DebugTypeMember,
+};
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::op_interfaces::SymbolOpInterface;
 use pliron::context::{Context, Ptr};
@@ -211,6 +213,7 @@ fn compute_reachable_blocks(body: &mir::Body) -> std::collections::BTreeSet<usiz
 struct LocalDebugInfo {
     variable: DebugLocalVariableInfo,
     loc: pliron::location::Location,
+    source_scope: u32,
 }
 
 /// Build the first full-debug variable map.
@@ -262,13 +265,23 @@ fn collect_debug_locals(
                 ty,
             },
             loc: span_to_location(ctx, info.source_info.span),
+            source_scope: info.source_info.scope,
         });
     }
 
     locals
 }
 
+/// Maximum nesting depth for composite debug types. Guards against deeply
+/// nested or (via generics) pathological value-type trees; beyond this we omit
+/// the inner detail rather than recurse without bound.
+const MAX_DEBUG_TYPE_DEPTH: usize = 8;
+
 fn debug_type_for_ty(ty: &Ty) -> Option<DebugLocalTypeKind> {
+    debug_type_for_ty_at(ty, 0)
+}
+
+fn debug_type_for_ty_at(ty: &Ty, depth: usize) -> Option<DebugLocalTypeKind> {
     match ty.kind() {
         TyKind::RigidTy(RigidTy::Bool) => Some(DebugLocalTypeKind::Basic {
             name: "bool".to_string(),
@@ -302,7 +315,130 @@ fn debug_type_for_ty(ty: &Ty) -> Option<DebugLocalTypeKind> {
                 size_bits: 64,
             })
         }
+        TyKind::RigidTy(RigidTy::Tuple(subtypes)) if depth < MAX_DEBUG_TYPE_DEPTH => {
+            let name = format!(
+                "({})",
+                subtypes
+                    .iter()
+                    .map(short_ty_name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let fields = subtypes
+                .iter()
+                .enumerate()
+                .map(|(idx, sub)| (format!("__{idx}"), *sub));
+            debug_struct_type(ty, name, fields, depth)
+        }
+        TyKind::RigidTy(RigidTy::Adt(adt_def, substs)) if depth < MAX_DEBUG_TYPE_DEPTH => {
+            // Only plain structs (one variant) are described as composites here;
+            // enums and unions need DWARF variant parts (deferred).
+            let variants = adt_def.variants();
+            if variants.len() != 1 {
+                return None;
+            }
+            let name = adt_def.trimmed_name();
+            let fields = variants[0]
+                .fields()
+                .into_iter()
+                .map(|field| (field.name.to_string(), field.ty_with_args(&substs)));
+            debug_struct_type(ty, name, fields, depth)
+        }
+        TyKind::RigidTy(RigidTy::Array(elem_ty, len_const)) if depth < MAX_DEBUG_TYPE_DEPTH => {
+            let count = array_len_const(&len_const)?;
+            let element = debug_type_for_ty_at(&elem_ty, depth + 1)?;
+            let size_bits = layout_size_bits(ty)?;
+            Some(DebugLocalTypeKind::Array {
+                name: format!("[{}; {count}]", short_ty_name(&elem_ty)),
+                size_bits,
+                element: Box::new(element),
+                count,
+            })
+        }
         _ => None,
+    }
+}
+
+/// Build a `DICompositeType`-shaped struct/tuple from rustc's real layout.
+///
+/// Member offsets come from `ty.layout()` (so `repr(Rust)` field reordering is
+/// honored), not declaration order. Fields whose type we cannot yet describe,
+/// and zero-sized fields (e.g. `PhantomData`), are omitted; the remaining
+/// members keep their correct offsets.
+fn debug_struct_type(
+    ty: &Ty,
+    name: String,
+    fields: impl Iterator<Item = (String, Ty)>,
+    depth: usize,
+) -> Option<DebugLocalTypeKind> {
+    let layout = ty.layout().ok()?;
+    let shape = layout.shape();
+    let offsets: Vec<u64> = match &shape.fields {
+        rustc_public::abi::FieldsShape::Arbitrary { offsets } => {
+            offsets.iter().map(|off| off.bytes() as u64).collect()
+        }
+        _ => return None,
+    };
+    let size_bits = shape.size.bytes() as u64 * 8;
+
+    let mut members = Vec::new();
+    for (idx, (field_name, field_ty)) in fields.enumerate() {
+        let offset_bytes = *offsets.get(idx)?;
+        let Some(member_ty) = debug_type_for_ty_at(&field_ty, depth + 1) else {
+            continue;
+        };
+        if member_ty.size_bits() == 0 {
+            continue;
+        }
+        members.push(DebugTypeMember {
+            name: field_name,
+            offset_bits: offset_bytes * 8,
+            ty: member_ty,
+        });
+    }
+
+    if members.is_empty() {
+        return None;
+    }
+
+    Some(DebugLocalTypeKind::Struct {
+        name,
+        size_bits,
+        members,
+    })
+}
+
+/// Total size of `ty` in bits from its layout, or `None` if unavailable.
+fn layout_size_bits(ty: &Ty) -> Option<u64> {
+    Some(ty.layout().ok()?.shape().size.bytes() as u64 * 8)
+}
+
+/// Evaluate a fixed array's length constant to a `u64`.
+fn array_len_const(len_const: &rustc_public::ty::TyConst) -> Option<u64> {
+    match len_const.kind() {
+        rustc_public::ty::TyConstKind::Value(_, alloc) => {
+            let mut arr = [0u8; 8];
+            for (i, byte) in alloc.bytes.iter().take(8).enumerate() {
+                arr[i] = (*byte)?;
+            }
+            Some(u64::from_le_bytes(arr))
+        }
+        _ => None,
+    }
+}
+
+/// A short, human-readable name for a type, used only for composite display.
+fn short_ty_name(ty: &Ty) -> String {
+    match ty.kind() {
+        TyKind::RigidTy(RigidTy::Bool) => "bool".to_string(),
+        TyKind::RigidTy(RigidTy::Int(int_ty)) => int_name(int_ty).to_string(),
+        TyKind::RigidTy(RigidTy::Uint(uint_ty)) => uint_name(uint_ty).to_string(),
+        TyKind::RigidTy(RigidTy::Float(float_ty)) => float_name(float_ty).to_string(),
+        TyKind::RigidTy(RigidTy::RawPtr(..)) | TyKind::RigidTy(RigidTy::Ref(..)) => {
+            "ptr".to_string()
+        }
+        TyKind::RigidTy(RigidTy::Adt(adt_def, _)) => adt_def.trimmed_name(),
+        _ => "_".to_string(),
     }
 }
 
@@ -407,6 +543,7 @@ fn emit_entry_allocas(
     num_args: usize,
     value_map: &mut ValueMap,
     debug_kind: DebugKind,
+    debug_source_scopes: Option<&DebugSourceScopeMap>,
 ) -> Option<Ptr<Operation>> {
     let mut prev_op: Option<Ptr<Operation>> = None;
     let debug_locals = if debug_kind.variables_enabled() {
@@ -443,6 +580,11 @@ fn emit_entry_allocas(
         let (op, slot) = ValueMap::emit_alloca(ctx, mir_ty, entry_block, prev_op);
         if let Some(info) = debug_locals.get(&local) {
             llvm_export::ops::set_debug_local_variable(ctx, op, info.variable.clone());
+            if debug_source_scopes
+                .is_some_and(|map| map.scopes.iter().any(|scope| scope.id == info.source_scope))
+            {
+                llvm_export::ops::set_debug_local_source_scope(ctx, op, info.source_scope);
+            }
             op.deref_mut(ctx).set_loc(info.loc.clone());
         }
         prev_op = Some(op);
@@ -491,6 +633,7 @@ pub fn translate_body(
     override_name: Option<&str>,
     legaliser: &mut Legaliser,
     debug_kind: DebugKind,
+    debug_source_scopes: Option<&DebugSourceScopeMap>,
 ) -> TranslationResult<Ptr<Operation>> {
     // Create a value map to track MIR locals -> pliron IR values
     let num_locals = body.locals().len();
@@ -713,6 +856,12 @@ pub fn translate_body(
         }
     }
 
+    if let Some(scope_map) = debug_source_scopes
+        && debug_kind.variables_enabled()
+    {
+        llvm_export::ops::set_debug_source_scope_map(ctx, op_ptr, scope_map);
+    }
+
     set_alwaysinline_attr_from_flag(ctx, &mir_func_op, is_kernel, is_inline_always);
 
     // Get the function body region (region 0)
@@ -761,6 +910,7 @@ pub fn translate_body(
         num_args,
         &mut value_map,
         debug_kind,
+        debug_source_scopes,
     );
 
     // -------------------------------------------------------------------------

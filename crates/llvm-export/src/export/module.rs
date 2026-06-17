@@ -166,7 +166,7 @@ pub(super) fn export_module_with_externs_impl(
     }
 
     // 5. Debug intrinsic declarations used by full-debug local variables.
-    if state.debug_declare_used {
+    if state.debug_declare_used || state.debug_value_used {
         writeln!(&mut output).unwrap();
         state.emit_debug_intrinsic_declarations(&mut output);
     }
@@ -309,7 +309,7 @@ pub(super) fn export_module_to_string_with_config(
     }
 
     // Emit debug intrinsic declarations used by full-debug local variables.
-    if state.debug_declare_used {
+    if state.debug_declare_used || state.debug_value_used {
         writeln!(&mut output).unwrap();
         state.emit_debug_intrinsic_declarations(&mut output);
     }

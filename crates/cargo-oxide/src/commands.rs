@@ -657,7 +657,13 @@ pub fn codegen_show_pipeline(ctx: &Context, example: &str, emit_nvvm_ir: bool, a
 /// flags, then launches the debugger on the resulting binary. Prints a
 /// quick-reference cheat sheet for common cuda-gdb commands before handing
 /// control to the debugger.
-pub fn codegen_debug(ctx: &Context, example: &str, use_cgdb: bool, use_tui: bool) {
+pub fn codegen_debug(
+    ctx: &Context,
+    example: &str,
+    arch: Option<&str>,
+    use_cgdb: bool,
+    use_tui: bool,
+) {
     let cuda_gdb = find_executable(
         "cuda-gdb",
         &[
@@ -690,9 +696,18 @@ pub fn codegen_debug(ctx: &Context, example: &str, use_cgdb: bool, use_tui: bool
         ctx.workspace_root.clone()
     };
 
+    let detected_device_arch = detect_run_target_arch(arch, false);
+
     println!("Building {} with debug info...", example);
+    if let Some(dev) = detected_device_arch.as_deref() {
+        println!("Detected GPU arch: {dev} (via nvidia-smi)");
+    }
+
+    clean_generated_files(&example_dir, example);
 
     let rustflags = build_rustflags(&ctx.backend_so, true);
+
+    touch_main_rs(&example_dir);
 
     let mut cmd = Command::new("cargo");
     cmd.args(["build", "--release"])
@@ -700,6 +715,11 @@ pub fn codegen_debug(ctx: &Context, example: &str, use_cgdb: bool, use_tui: bool
         .env("RUSTFLAGS", &rustflags)
         .env("CARGO_PROFILE_RELEASE_DEBUG", "2");
 
+    forward_env_var(&mut cmd, "CUDA_OXIDE_SHOW_RUSTC_MIR");
+    forward_env_var(&mut cmd, "CUDA_OXIDE_DUMP_MIR");
+    forward_env_var(&mut cmd, "CUDA_OXIDE_DUMP_LLVM");
+
+    apply_debug_output_mode(&mut cmd, arch, detected_device_arch.as_deref());
     apply_ld_library_path(&mut cmd);
 
     let status = cmd.status().expect("Failed to run cargo build");
@@ -1454,6 +1474,20 @@ fn apply_output_mode(cmd: &mut Command, emit_nvvm_ir: bool, arch: Option<&str>) 
     }
 }
 
+/// Configure the device-code target for `cargo oxide debug`.
+///
+/// Debug launches the built binary immediately, so it follows `run` rather than
+/// `build`: an explicit `--arch`/`CUDA_OXIDE_TARGET` remains a hard override,
+/// while the local GPU arch is forwarded as a compatibility hint.
+fn apply_debug_output_mode(
+    cmd: &mut Command,
+    explicit_arch: Option<&str>,
+    detected_device_arch: Option<&str>,
+) {
+    apply_output_mode(cmd, false, explicit_arch);
+    apply_device_arch_hint(cmd, explicit_arch, detected_device_arch);
+}
+
 /// Forward the auto-detected GPU arch as a *hint* via `CUDA_OXIDE_DEVICE_ARCH`.
 ///
 /// Unlike `CUDA_OXIDE_TARGET` (a hard override), this is advisory: the backend
@@ -2088,6 +2122,34 @@ mod tests {
         apply_device_arch_hint(&mut cmd, None, None);
 
         assert_eq!(command_env(&cmd, "CUDA_OXIDE_DEVICE_ARCH"), None);
+    }
+
+    #[test]
+    fn apply_debug_output_mode_forwards_detected_gpu_hint() {
+        let mut cmd = Command::new("cargo");
+
+        apply_debug_output_mode(&mut cmd, None, Some("sm_120a"));
+
+        assert_eq!(
+            command_env(&cmd, "CUDA_OXIDE_DEVICE_ARCH").as_deref(),
+            Some("sm_120a")
+        );
+        assert_eq!(command_env(&cmd, "CUDA_OXIDE_TARGET"), None);
+        assert_eq!(command_env(&cmd, "CUDA_OXIDE_EMIT_NVVM_IR"), None);
+    }
+
+    #[test]
+    fn apply_debug_output_mode_honors_explicit_arch_override() {
+        let mut cmd = Command::new("cargo");
+
+        apply_debug_output_mode(&mut cmd, Some("sm_90"), Some("sm_120a"));
+
+        assert_eq!(
+            command_env(&cmd, "CUDA_OXIDE_TARGET").as_deref(),
+            Some("sm_90")
+        );
+        assert_eq!(command_env(&cmd, "CUDA_OXIDE_DEVICE_ARCH"), None);
+        assert_eq!(command_env(&cmd, "CUDA_OXIDE_EMIT_NVVM_IR"), None);
     }
 
     #[test]

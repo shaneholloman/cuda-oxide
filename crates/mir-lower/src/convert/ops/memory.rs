@@ -126,6 +126,14 @@ fn copy_debug_local_variable(ctx: &mut Context, mir_op: Ptr<Operation>, llvm_op:
     if let Some(info) = llvm_export::ops::debug_local_variable(ctx, mir_op) {
         llvm_export::ops::set_debug_local_variable(ctx, llvm_op, info);
     }
+    if let Some(scope) = llvm_export::ops::debug_local_source_scope(ctx, mir_op) {
+        llvm_export::ops::set_debug_local_source_scope(ctx, llvm_op, scope);
+    }
+    if let Some((file, pos)) = llvm_export::ops::debug_local_declaration_location(ctx, mir_op) {
+        llvm_export::ops::set_debug_local_declaration_location(
+            ctx, llvm_op, file, pos.line, pos.column,
+        );
+    }
 }
 
 /// Convert `mir.memcpy` to the matching `llvm.memcpy.p<dst>.p<src>.i<bits>`.
@@ -296,6 +304,26 @@ pub(crate) fn convert_load(
     rewriter.insert_operation(ctx, llvm_load.get_operation());
     rewriter.replace_operation(ctx, op, llvm_load.get_operation());
 
+    Ok(())
+}
+
+/// Convert `mir.dbg_value` to the LLVM-export debug marker.
+///
+/// The op is still debug-only after lowering. The textual LLVM exporter later
+/// prints it as an `llvm.dbg.value` intrinsic call.
+pub(crate) fn convert_dbg_value(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let value = op.deref(ctx).get_operand(0);
+    let loc = op.deref(ctx).loc().clone();
+    let llvm_dbg_value = llvm::DebugValueOp::new(ctx, value);
+    llvm_dbg_value.get_operation().deref_mut(ctx).set_loc(loc);
+    copy_debug_local_variable(ctx, op, llvm_dbg_value.get_operation());
+    rewriter.insert_operation(ctx, llvm_dbg_value.get_operation());
+    rewriter.erase_operation(ctx, op);
     Ok(())
 }
 
@@ -881,14 +909,23 @@ mod tests {
     use pliron::builtin::types::{IntegerType, Signedness};
     use pliron::context::Context;
     use pliron::linked_list::ContainsLinkedList;
+    use pliron::location::{Location, Source};
     use pliron::op::Op;
     use pliron::operation::Operation;
+    use std::path::PathBuf;
 
     fn ptr_addrspace(ctx: &Context, ty: Ptr<TypeObj>) -> u32 {
         ty.deref(ctx)
             .downcast_ref::<PointerType>()
             .expect("expected llvm.PointerType")
             .address_space()
+    }
+
+    fn src_location(ctx: &mut Context, file: &str, line: i32, column: i32) -> Location {
+        Location::SrcPos {
+            src: Source::new_from_file(ctx, PathBuf::from(file)),
+            pos: combine::stream::position::SourcePosition { line, column },
+        }
     }
 
     #[test]
@@ -1072,6 +1109,171 @@ mod tests {
         let body = kernel_blocks(&ctx, module_ptr);
         assert_eq!(count_ops::<llvm::LoadOp>(&ctx, &body), 1);
         assert_eq!(count_ops::<mir::MirLoadOp>(&ctx, &body), 0);
+    }
+
+    #[test]
+    fn convert_dbg_value_lowers_to_llvm_dbg_value() {
+        let mut ctx = make_ctx();
+        let i32_ty: Ptr<TypeObj> = IntegerType::get(&mut ctx, 32, Signedness::Signless).into();
+
+        let (module_ptr, block) = build_kernel(&mut ctx, vec![i32_ty], vec![]);
+        let value = block.deref(&ctx).get_argument(0);
+
+        let dbg_op = mir::MirDbgValueOp::new(&mut ctx, value);
+        let dbg_loc = pliron::location::Location::Named {
+            name: "current value location".to_string(),
+            child_loc: Box::new(pliron::location::Location::Unknown),
+        };
+        dbg_op
+            .get_operation()
+            .deref_mut(&ctx)
+            .set_loc(dbg_loc.clone());
+        llvm::set_debug_local_variable(
+            &mut ctx,
+            dbg_op.get_operation(),
+            llvm::DebugLocalVariableInfo {
+                name: "x".to_string(),
+                argument_index: None,
+                ty: llvm::DebugLocalTypeKind::Basic {
+                    name: "i32".to_string(),
+                    size_bits: 32,
+                    encoding: "DW_ATE_signed",
+                },
+            },
+        );
+        llvm::set_debug_local_source_scope(&mut ctx, dbg_op.get_operation(), 42);
+        llvm::set_debug_local_declaration_location(
+            &mut ctx,
+            dbg_op.get_operation(),
+            PathBuf::from("decl.rs"),
+            7,
+            3,
+        );
+        dbg_op.get_operation().insert_at_back(block, &ctx);
+        append_mir_return(&mut ctx, block, vec![]);
+
+        crate::lower_mir_to_llvm(&mut ctx, module_ptr).expect("lowering failed");
+
+        let body = kernel_blocks(&ctx, module_ptr);
+        assert_eq!(count_ops::<mir::MirDbgValueOp>(&ctx, &body), 0);
+        let dbg_value = find_first::<llvm::DebugValueOp>(&ctx, &body)
+            .expect("expected lowered llvm.dbg_value marker");
+        assert_eq!(
+            dbg_value.get_operation().deref(&ctx).loc(),
+            dbg_loc,
+            "dbg.value lowering should keep the current-value source location"
+        );
+        let info = llvm::debug_local_variable(&ctx, dbg_value.get_operation())
+            .expect("debug local metadata should survive dbg_value lowering");
+
+        assert_eq!(info.name, "x");
+        assert_eq!(
+            llvm::debug_local_source_scope(&ctx, dbg_value.get_operation()),
+            Some(42),
+            "dbg.value lowering should keep the MIR source-scope owner"
+        );
+        let (decl_file, decl_pos) =
+            llvm::debug_local_declaration_location(&ctx, dbg_value.get_operation())
+                .expect("declaration location should survive dbg_value lowering");
+        assert_eq!(decl_file, PathBuf::from("decl.rs"));
+        assert_eq!(decl_pos.line, 7);
+        assert_eq!(decl_pos.column, 3);
+        assert_eq!(
+            info.ty,
+            llvm::DebugLocalTypeKind::Basic {
+                name: "i32".to_string(),
+                size_bits: 32,
+                encoding: "DW_ATE_signed",
+            }
+        );
+    }
+
+    #[test]
+    fn mem2reg_salvages_tagged_alloca_into_mir_dbg_value() {
+        let mut ctx = make_ctx();
+        let i32_ty: Ptr<TypeObj> = IntegerType::get(&mut ctx, 32, Signedness::Signless).into();
+        let mir_ptr_ty = MirPtrType::get_generic(&mut ctx, i32_ty, true);
+
+        let (module_ptr, block) = build_kernel(&mut ctx, vec![i32_ty], vec![i32_ty]);
+        let arg = block.deref(&ctx).get_argument(0);
+
+        let alloca_op = Operation::new(
+            &mut ctx,
+            mir::MirAllocaOp::get_concrete_op_info(),
+            vec![mir_ptr_ty.into()],
+            vec![],
+            vec![],
+            0,
+        );
+        let decl_loc = src_location(&mut ctx, "kernel.rs", 12, 9);
+        alloca_op.deref_mut(&ctx).set_loc(decl_loc.clone());
+        llvm::set_debug_local_variable(
+            &mut ctx,
+            alloca_op,
+            llvm::DebugLocalVariableInfo {
+                name: "x".to_string(),
+                argument_index: Some(1),
+                ty: llvm::DebugLocalTypeKind::Basic {
+                    name: "i32".to_string(),
+                    size_bits: 32,
+                    encoding: "DW_ATE_signed",
+                },
+            },
+        );
+        llvm::set_debug_local_source_scope(&mut ctx, alloca_op, 9);
+        alloca_op.insert_at_back(block, &ctx);
+        let slot = alloca_op.deref(&ctx).get_result(0);
+
+        let store_op = Operation::new(
+            &mut ctx,
+            mir::MirStoreOp::get_concrete_op_info(),
+            vec![],
+            vec![slot, arg],
+            vec![],
+            0,
+        );
+        store_op.insert_at_back(block, &ctx);
+
+        let load_op = Operation::new(
+            &mut ctx,
+            mir::MirLoadOp::get_concrete_op_info(),
+            vec![i32_ty],
+            vec![slot],
+            vec![],
+            0,
+        );
+        load_op.insert_at_back(block, &ctx);
+        let loaded = load_op.deref(&ctx).get_result(0);
+        append_mir_return(&mut ctx, block, vec![loaded]);
+
+        let mut analyses = pliron::pass_manager::AnalysisManager::default();
+        pliron::opts::mem2reg::mem2reg(module_ptr, &mut ctx, &mut analyses)
+            .expect("mem2reg should promote the local slot");
+
+        let blocks = vec![block];
+        assert_eq!(count_ops::<mir::MirAllocaOp>(&ctx, &blocks), 0);
+        assert_eq!(count_ops::<mir::MirStoreOp>(&ctx, &blocks), 0);
+        assert_eq!(count_ops::<mir::MirLoadOp>(&ctx, &blocks), 0);
+
+        let dbg_values = find_all::<mir::MirDbgValueOp>(&ctx, &blocks);
+        assert!(
+            !dbg_values.is_empty(),
+            "mem2reg should leave value-based debug records for promoted locals"
+        );
+        let info = llvm::debug_local_variable(&ctx, dbg_values[0].get_operation())
+            .expect("mir.dbg_value should carry the promoted local metadata");
+        assert_eq!(info.name, "x");
+        assert_eq!(info.argument_index, Some(1));
+        assert_eq!(
+            llvm::debug_local_source_scope(&ctx, dbg_values[0].get_operation()),
+            Some(9),
+            "mem2reg salvage should keep the local's MIR source-scope owner"
+        );
+        assert_eq!(
+            dbg_values[0].get_operation().deref(&ctx).loc(),
+            decl_loc,
+            "debug records for source-less promoted ops should fall back to the local declaration"
+        );
     }
 
     #[test]

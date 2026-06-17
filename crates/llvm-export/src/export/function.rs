@@ -238,6 +238,9 @@ impl<'a> ModuleExportState<'a> {
         if let Some(entry_block) = entry_block_opt {
             let func_loc = func.get_operation().deref(self.ctx).loc();
             let debug_scope = self.debug_subprogram_for_function(&fixed_func_name, &func_loc);
+            if let Some(scope_id) = debug_scope {
+                self.register_debug_source_scopes_for_function(scope_id, func.get_operation());
+            }
 
             write!(output, "define ").unwrap();
             if is_kernel && self.emit_ptx_kernel_keyword {

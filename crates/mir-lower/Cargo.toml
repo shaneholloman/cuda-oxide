@@ -16,3 +16,8 @@ dialect-mir = { workspace = true }
 dialect-nvvm = { workspace = true }
 anyhow = { workspace = true }
 reserved-oxide-symbols = { workspace = true }
+
+[dev-dependencies]
+# Only used by unit tests to build a `combine` SourcePosition for synthetic
+# pliron source locations; not needed by the crate's non-test code.
+combine = { workspace = true }
