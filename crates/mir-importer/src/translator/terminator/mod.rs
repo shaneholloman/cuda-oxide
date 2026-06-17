@@ -1637,6 +1637,153 @@ fn extract_func_info(func: &mir::Operand) -> (Option<String>, Option<String>, Op
     }
 }
 
+/// Lower `core::intrinsics::typed_swap_nonoverlapping::<T>(x, y)`, the
+/// primitive behind `core::mem::swap`/`mem::replace`, as load/load/store/store.
+/// The two pointers are guaranteed non-overlapping, so the temp-free crossover
+/// `t0 = *x; t1 = *y; *x = t1; *y = t0` is valid (the loaded SSA values are
+/// captured before either store runs). Returns a unit result + goto target.
+#[allow(clippy::too_many_arguments)]
+fn emit_typed_swap(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    use dialect_mir::ops::{MirConstructTupleOp, MirLoadOp, MirStoreOp};
+    use dialect_mir::types::{MirPtrType, MirTupleType};
+
+    if args.len() != 2 {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(
+                "typed_swap_nonoverlapping requires two pointer operands".to_string()
+            )
+        );
+    }
+
+    let (ptr_x, last) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+    let (ptr_y, last) =
+        rvalue::translate_operand(ctx, body, &args[1], value_map, block_ptr, last, loc.clone())?;
+
+    let elem_ty = {
+        let t = ptr_x.get_type(ctx);
+        let r = t.deref(ctx);
+        match r.downcast_ref::<MirPtrType>() {
+            Some(p) => p.pointee,
+            None => {
+                return input_err!(
+                    loc,
+                    TranslationErr::unsupported(
+                        "typed_swap_nonoverlapping operand is not a pointer".to_string()
+                    )
+                );
+            }
+        }
+    };
+
+    // t0 = *x
+    let load_x = Operation::new(
+        ctx,
+        MirLoadOp::get_concrete_op_info(),
+        vec![elem_ty],
+        vec![ptr_x],
+        vec![],
+        0,
+    );
+    load_x.deref_mut(ctx).set_loc(loc.clone());
+    match last {
+        Some(p) => load_x.insert_after(ctx, p),
+        None => load_x.insert_at_front(block_ptr, ctx),
+    }
+    let vx = load_x.deref(ctx).get_result(0);
+
+    // t1 = *y
+    let load_y = Operation::new(
+        ctx,
+        MirLoadOp::get_concrete_op_info(),
+        vec![elem_ty],
+        vec![ptr_y],
+        vec![],
+        0,
+    );
+    load_y.deref_mut(ctx).set_loc(loc.clone());
+    load_y.insert_after(ctx, load_x);
+    let vy = load_y.deref(ctx).get_result(0);
+
+    // *x = t1
+    let store_x = Operation::new(
+        ctx,
+        MirStoreOp::get_concrete_op_info(),
+        vec![],
+        vec![ptr_x, vy],
+        vec![],
+        0,
+    );
+    store_x.deref_mut(ctx).set_loc(loc.clone());
+    store_x.insert_after(ctx, load_y);
+
+    // *y = t0
+    let store_y = Operation::new(
+        ctx,
+        MirStoreOp::get_concrete_op_info(),
+        vec![],
+        vec![ptr_y, vx],
+        vec![],
+        0,
+    );
+    store_y.deref_mut(ctx).set_loc(loc.clone());
+    store_y.insert_after(ctx, store_x);
+
+    // unit result
+    let unit_ty = MirTupleType::get(ctx, vec![]);
+    let unit_op = Operation::new(
+        ctx,
+        MirConstructTupleOp::get_concrete_op_info(),
+        vec![unit_ty.into()],
+        vec![],
+        vec![],
+        0,
+    );
+    unit_op.deref_mut(ctx).set_loc(loc.clone());
+    unit_op.insert_after(ctx, store_y);
+    let unit_val = unit_op.deref(ctx).get_result(0);
+
+    let goto_prev = value_map
+        .store_local(ctx, destination.local, unit_val, block_ptr, Some(unit_op))
+        .unwrap_or(unit_op);
+
+    if let Some(target_idx) = target {
+        Ok(helpers::emit_goto(
+            ctx,
+            *target_idx,
+            goto_prev,
+            block_map,
+            loc,
+        ))
+    } else {
+        input_err!(
+            loc,
+            TranslationErr::unsupported(
+                "typed_swap_nonoverlapping call without target not supported".to_string()
+            )
+        )
+    }
+}
+
 /// Dispatches `cuda_device` intrinsic calls to their respective handlers.
 ///
 /// Returns `Ok(Some(op))` if the call was an intrinsic, `Ok(None)` otherwise.
@@ -1682,6 +1829,23 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
             kind,
+        )?));
+    }
+
+    if name == "core::intrinsics::typed_swap_nonoverlapping"
+        || name == "std::intrinsics::typed_swap_nonoverlapping"
+    {
+        return Ok(Some(emit_typed_swap(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
         )?));
     }
 
