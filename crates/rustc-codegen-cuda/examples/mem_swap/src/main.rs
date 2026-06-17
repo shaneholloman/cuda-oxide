@@ -74,10 +74,10 @@ fn main() {
 
     let out = d_out.to_host_vec(&stream).unwrap();
     let mut ok = true;
-    for i in 0..N {
+    for (i, got) in out.iter().enumerate() {
         let want = (100 + i as i32) * 1000 + i as i32; // b[i]*1000 + a[i]
-        if out[i] != want {
-            println!("FAIL: lane {i}: out={} (want {want})", out[i]);
+        if *got != want {
+            println!("FAIL: lane {i}: out={got} (want {want})");
             ok = false;
             break;
         }
