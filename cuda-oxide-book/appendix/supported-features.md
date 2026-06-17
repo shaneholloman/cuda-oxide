@@ -27,9 +27,14 @@ roadmap, **N/A** = not applicable or no identified need.
 | Generics and Monomorphization | **Full** | Generic kernels and device functions with trait bounds. Monomorphized instances collected from rustc MIR. Const generics supported. |
 | Enums (`Option<T>`, `Result<T,E>`, custom) | **Full** | Full enum support including discriminant extraction and payload access. Pattern matching on enums works. |
 | Struct Construction and Field Access | **Full** | Struct literals, field access, pass-by-value and return values. User-defined structs supported without annotations. |
-| Array Types (`[T; N]`) | **Full** | Static array construction, constant-index and runtime-index access. Mutable arrays auto-promoted to memory-backed. |
+| Array Types (`[T; N]`) | **Full** | Static construction, constant- and runtime-index access. Array value constants (bare and nested) materialized. Mutable arrays auto-promoted to memory-backed. |
 | `CuSimd<T, N>` SIMD Type | **Full** | Generic SIMD register type with named accessors (`x`/`y`/`z`/`w`), runtime and compile-time indexing, `to_array` conversion. |
 | ABI Scalarization | **Full** | Slices are scalarized at kernel boundaries (`&[T]` -> `(ptr, len)`, reconstructed inside the function). Structs and closures pass by value as one byval `.param`; field flattening still applies on internal device-to-device calls. |
+
+Array value constants are limited to primitive leaves (integers, `f16`,
+`f32`, `f64`) and nested arrays of those. Arrays whose elements are
+structs or other ADTs are not yet materialized as constants; they need
+layout-aware field decoding rather than the primitive byte-slicing rule.
 
 ## Compiler: Closures
 

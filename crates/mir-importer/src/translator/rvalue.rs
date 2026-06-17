@@ -4527,8 +4527,8 @@ fn translate_ptr_to_array_constant(
 /// Lower a bare `MirArrayType` value constant (e.g. `const TABLE: [f32; N] =
 /// [..]` indexed by runtime value) to a `MirConstructArrayOp` whose operands
 /// are typed scalar `MirFloatConstantOp` / `MirConstantOp`s. Mirrors
-/// `translate_ptr_to_array_constant` but skips the final `MirRefOp` wrap —
-/// the caller wants the array by value.
+/// `translate_ptr_to_array_constant` but skips the final `MirRefOp` wrap,
+/// since the caller wants the array by value.
 fn translate_array_value_constant(
     ctx: &mut Context,
     constant: &mir::ConstOperand,
