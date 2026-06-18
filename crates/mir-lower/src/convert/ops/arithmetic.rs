@@ -279,8 +279,12 @@ pub(crate) fn convert_checked_add(
     operands_info: &OperandsInfo,
 ) -> Result<()> {
     let (lhs, rhs) = get_binary_operands(op, ctx)?;
-    let is_signed = is_signed_int_op(ctx, op, operands_info)?;
-    convert_checked_binop_with_intrinsic(ctx, rewriter, op, lhs, rhs, is_signed, "sadd", "uadd")
+    let op_name = if is_signed_int_op(ctx, op, operands_info)? {
+        "sadd"
+    } else {
+        "uadd"
+    };
+    convert_checked_binop_with_intrinsic(ctx, rewriter, op, lhs, rhs, op_name)
 }
 
 /// Convert `mir.checked_mul` to `llvm.smul.with.overflow` / `llvm.umul.with.overflow`.
@@ -294,8 +298,12 @@ pub(crate) fn convert_checked_mul(
     operands_info: &OperandsInfo,
 ) -> Result<()> {
     let (lhs, rhs) = get_binary_operands(op, ctx)?;
-    let is_signed = is_signed_int_op(ctx, op, operands_info)?;
-    convert_checked_binop_with_intrinsic(ctx, rewriter, op, lhs, rhs, is_signed, "smul", "umul")
+    let op_name = if is_signed_int_op(ctx, op, operands_info)? {
+        "smul"
+    } else {
+        "umul"
+    };
+    convert_checked_binop_with_intrinsic(ctx, rewriter, op, lhs, rhs, op_name)
 }
 
 /// Convert `mir.checked_sub` to `llvm.ssub.with.overflow` / `llvm.usub.with.overflow`.
@@ -309,12 +317,17 @@ pub(crate) fn convert_checked_sub(
     operands_info: &OperandsInfo,
 ) -> Result<()> {
     let (lhs, rhs) = get_binary_operands(op, ctx)?;
-    let is_signed = is_signed_int_op(ctx, op, operands_info)?;
-    convert_checked_binop_with_intrinsic(ctx, rewriter, op, lhs, rhs, is_signed, "ssub", "usub")
+    let op_name = if is_signed_int_op(ctx, op, operands_info)? {
+        "ssub"
+    } else {
+        "usub"
+    };
+    convert_checked_binop_with_intrinsic(ctx, rewriter, op, lhs, rhs, op_name)
 }
 
-/// Emit `llvm.{s,u}{add,sub,mul}.with.overflow.iN` for a checked integer binop.
+/// Emit `llvm.<op_name>.with.overflow.iN` for a checked integer binop.
 ///
+/// `op_name` is one of `sadd`, `uadd`, `ssub`, `usub`, `smul`, `umul`.
 /// The LLVM intrinsic returns `{iN, i1}` directly, matching the converted MIR
 /// result type. The `op` is replaced with the intrinsic call, so no
 /// InsertValue reassembly is needed.
@@ -324,9 +337,7 @@ fn convert_checked_binop_with_intrinsic(
     op: Ptr<Operation>,
     lhs: Value,
     rhs: Value,
-    is_signed: bool,
-    signed_op: &str,   // e.g. "sadd", "ssub", "smul"
-    unsigned_op: &str, // e.g. "uadd", "usub", "umul"
+    op_name: &str,
 ) -> Result<()> {
     let loc = op.deref(ctx).loc();
     let lhs_ty = lhs.get_type(ctx);
@@ -337,8 +348,7 @@ fn convert_checked_binop_with_intrinsic(
         .map(|t| t.width())
         .ok_or_else(|| pliron::input_error!(loc, "checked binop: lhs must be an integer type"))?;
 
-    let chosen_op = if is_signed { signed_op } else { unsigned_op };
-    let intrinsic_name = format!("llvm.{chosen_op}.with.overflow.i{width}");
+    let intrinsic_name = format!("llvm.{op_name}.with.overflow.i{width}");
 
     let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless);
     let struct_ty = llvm_types::StructType::get_unnamed(ctx, vec![lhs_ty, i1_ty.into()]);
