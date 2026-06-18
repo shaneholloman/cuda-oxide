@@ -131,6 +131,7 @@ unsafe impl DeviceCopy for half::f16 {}
 pub struct DeviceBuffer<T> {
     ptr: CUdeviceptr,
     len: usize,
+    num_bytes: usize,
     ctx: Arc<CudaContext>,
     /// When the allocation came from the stream-ordered pool
     /// (`cuMemAllocAsync`), this holds an `Arc` to the owning stream so the
@@ -192,7 +193,7 @@ impl<T> DeviceBuffer<T> {
     /// Total size in bytes (`len * size_of::<T>()`).
     #[inline]
     pub fn num_bytes(&self) -> usize {
-        self.len * std::mem::size_of::<T>()
+        self.num_bytes
     }
 
     /// Returns a reference to the owning context.
@@ -212,6 +213,10 @@ impl<T> DeviceBuffer<T> {
     /// - `ptr` is assumed to be a synchronous (`cuMemAlloc`) allocation and is
     ///   freed with the synchronous `cuMemFree` on drop. Do not pass a
     ///   stream-ordered (`cuMemAllocAsync`) pointer here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len * size_of::<T>()` overflows `usize`.
     pub unsafe fn from_raw_parts(ptr: CUdeviceptr, len: usize, ctx: Arc<CudaContext>) -> Self {
         // SAFETY: `from_raw_parts` has the same raw-allocation safety contract,
         // with no stream-ordered deallocation metadata attached.
@@ -224,9 +229,12 @@ impl<T> DeviceBuffer<T> {
         ctx: Arc<CudaContext>,
         dealloc_stream: Option<Arc<CudaStream>>,
     ) -> Self {
+        let num_bytes =
+            allocation_size::<T>(len).expect("DeviceBuffer::from_raw_parts byte size overflow");
         Self {
             ptr,
             len,
+            num_bytes,
             ctx,
             dealloc_stream,
             _marker: PhantomData,
@@ -322,7 +330,7 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
     pub fn from_host(stream: &CudaStream, data: &[T]) -> Result<Self, DriverError> {
         let ctx = stream.context().clone();
         let len = data.len();
-        let num_bytes = std::mem::size_of_val(data);
+        let num_bytes = allocation_size::<T>(len)?;
 
         // cuMemAlloc rejects zero-byte requests with CUDA_ERROR_INVALID_VALUE,
         // so represent an empty buffer as a null pointer (Drop skips it).
@@ -444,7 +452,7 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
     /// no device memory is leaked.
     pub fn zeroed(stream: &CudaStream, len: usize) -> Result<Self, DriverError> {
         let ctx = stream.context().clone();
-        let num_bytes = len * std::mem::size_of::<T>();
+        let num_bytes = allocation_size::<T>(len)?;
 
         // cuMemAlloc rejects zero-byte requests with CUDA_ERROR_INVALID_VALUE,
         // so represent an empty buffer as a null pointer (Drop skips it).
@@ -640,7 +648,7 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         len: usize,
     ) -> Result<Self, DriverError> {
         let ctx = stream.context().clone();
-        let num_bytes = len * std::mem::size_of::<T>();
+        let num_bytes = allocation_size::<T>(len)?;
         if num_bytes == 0 {
             // SAFETY: a null pointer with zero bytes is never dereferenced
             // and Drop/drop_async ignore it.
@@ -651,6 +659,7 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         Ok(Self {
             ptr,
             len,
+            num_bytes,
             ctx,
             dealloc_stream: Some(stream.clone()),
             _marker: PhantomData,
@@ -757,4 +766,10 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         }
         unsafe { crate::memory::memset_d8_async(self.ptr, 0, self.num_bytes(), stream.cu_stream()) }
     }
+}
+
+fn allocation_size<T>(len: usize) -> Result<usize, DriverError> {
+    len.checked_mul(std::mem::size_of::<T>()).ok_or(DriverError(
+        cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE,
+    ))
 }

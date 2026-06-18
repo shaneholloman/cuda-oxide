@@ -60,6 +60,18 @@ fn device_buffer_supports_empty_allocations() {
 }
 
 #[test]
+fn device_buffer_rejects_allocation_size_overflow() {
+    let ctx = CudaContext::new(0).expect("failed to create CUDA context");
+    let stream = ctx.new_stream().expect("failed to create CUDA stream");
+    let overflowing_len = usize::MAX / std::mem::size_of::<u64>() + 1;
+
+    assert!(DeviceBuffer::<u64>::zeroed(&stream, overflowing_len).is_err());
+    // SAFETY: the constructor returns an error before allocation, and this
+    // test never reads from the uninitialized buffer.
+    assert!(unsafe { DeviceBuffer::<u64>::uninitialized_async(&stream, overflowing_len) }.is_err());
+}
+
+#[test]
 fn device_buffer_async_compat_methods_roundtrip() {
     let ctx = CudaContext::new(0).expect("failed to create CUDA context");
     let stream = ctx.new_stream().expect("failed to create CUDA stream");
