@@ -200,6 +200,20 @@ impl RustFloatMathIntrinsic {
             | "std::intrinsics::minimum_number_nsz_f32" => Some(Self::MinNumNszF32),
             "core::intrinsics::minimum_number_nsz_f64"
             | "std::intrinsics::minimum_number_nsz_f64" => Some(Self::MinNumNszF64),
+            // Trig that still routes through `std`'s libm shim. On current
+            // nightlies `core_float_math` moves `sin`/`cos` into core
+            // intrinsics (caught above), but `tan` is *not* in that feature,
+            // so `f{32,64}::tan()` lowers to `std::sys::cmath::tan{,f}` and
+            // would otherwise trip the forbidden-`std`-crate guard. Intercept
+            // it (and sin/cos defensively, for toolchains/builds that take the
+            // std path) and lower to `__nv_tan{,f}` like every other libdevice
+            // math call.
+            "std::sys::cmath::sinf" => Some(Self::SinF32),
+            "std::sys::cmath::sin" => Some(Self::SinF64),
+            "std::sys::cmath::cosf" => Some(Self::CosF32),
+            "std::sys::cmath::cos" => Some(Self::CosF64),
+            "std::sys::cmath::tanf" => Some(Self::TanF32),
+            "std::sys::cmath::tan" => Some(Self::TanF64),
             "std::sys::cmath::asinf" => Some(Self::AsinF32),
             "std::sys::cmath::asin" => Some(Self::AsinF64),
             "std::sys::cmath::acosf" => Some(Self::AcosF32),
