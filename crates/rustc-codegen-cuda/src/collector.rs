@@ -410,10 +410,14 @@ pub fn is_fully_monomorphized<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>)
 /// Paths into `std::sys::cmath` that mir-importer rewrites to a libdevice
 /// intrinsic placeholder.
 ///
-/// `f32::atan2`, `f32::atan`, `f64::atan2`, and `f64::atan` are declared
-/// in `std` and dispatched through `extern "C"` shims in `std::sys::cmath`.
-/// `f32::atan2` (etc.) is `#[inline]`, so MIR-opt collapses the wrapper and
-/// the surviving call site points directly at one of these shims. Device
+/// Several `f{32,64}` math methods are declared in `std` and dispatched
+/// through `extern "C"` shims in `std::sys::cmath` (`atan2`, `atan`, `cbrt`,
+/// and the inverse trig). `tan` belongs here too: unlike `sin`/`cos`, it is
+/// not part of this toolchain's `core_float_math`, so `f{32,64}::tan()`
+/// lowers to `std::sys::cmath::tan{,f}` rather than a `core::intrinsics`
+/// call. (`sin`/`cos` are listed defensively in case a build takes the std
+/// path.) These methods are `#[inline]`, so MIR-opt collapses the wrapper
+/// and the surviving call site points directly at one of these shims. Device
 /// codegen must never see them: mir-importer matches the same FQDN and
 /// emits an `__nv_*` libdevice call instead, and the collector silently
 /// skips them here so the std-crate guard doesn't fire.
@@ -431,7 +435,13 @@ pub fn is_fully_monomorphized<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>)
 fn is_intrinsic_lowered_cmath_shim(fn_path: &str) -> bool {
     matches!(
         fn_path,
-        "std::sys::cmath::asinf"
+        "std::sys::cmath::sinf"
+            | "std::sys::cmath::sin"
+            | "std::sys::cmath::cosf"
+            | "std::sys::cmath::cos"
+            | "std::sys::cmath::tanf"
+            | "std::sys::cmath::tan"
+            | "std::sys::cmath::asinf"
             | "std::sys::cmath::asin"
             | "std::sys::cmath::acosf"
             | "std::sys::cmath::acos"
